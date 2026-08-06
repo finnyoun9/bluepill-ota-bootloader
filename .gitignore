@@ -1,0 +1,37 @@
+# STM32CubeIDE
+Debug/
+Release/
+.settings/
+*.launch
+*.mxproject
+
+# Build artifacts
+*.o
+*.d
+*.elf
+*.hex
+*.bin
+*.map
+*.list
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ESP32 / PlatformIO
+.pio/
+build/
+sdkconfig
+sdkconfig.old
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+.venv/
