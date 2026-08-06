@@ -1,0 +1,714 @@
+/**
+ * @file    main.c
+ * @brief   Bootloader entry point and OTA state machine.
+ *
+ * This runs from 0x08000000 (8KB). It is bare-metal — no RTOS.
+ * Flash programming functions live in RAM (.ramfunc) to work around
+ * the STM32F103 single-bank constraint.
+ *
+ * Boot decision flow:
+ *   1. Check config area for BOOT_MODE_OTA flag
+ *   2. Check BOOT0 pin (PB0) for forced bootloader entry
+ *   3. Wait OTA_WINDOW_MS for CMD_OTA_BEGIN from ESP32
+ *   4. If none of the above → jump to application
+ */
+
+#include "bootloader.h"
+#include "stm32f1xx_hal.h"
+#include "../../../shared/protocol.h"
+#include "../../../shared/ota_config.h"
+#include <string.h>
+
+/*---------------------------------------------------------------------------
+ * Hardware pin definitions (Blue Pill)
+ *---------------------------------------------------------------------------*/
+
+#define LED_PORT                GPIOC
+#define LED_PIN                 GPIO_PIN_13    /* PC13 — onboard LED (active low) */
+
+#define BOOT0_PORT              GPIOB
+#define BOOT0_PIN               GPIO_PIN_0     /* PB0 — force-bootloader jumper */
+
+#define USART_BAUD              460800U
+
+/*---------------------------------------------------------------------------
+ * Static data (RAM only — bootloader is single-threaded)
+ *---------------------------------------------------------------------------*/
+
+static UART_HandleTypeDef    g_huart2;
+static ProtoParser_t         g_parser;
+static BootState_t           g_state = ST_BOOT;
+static OtaContext_t           g_ota;
+static uint8_t               g_frame_buf[PROTO_MAX_FRAME];
+static uint32_t              g_ticks_at_boot;  /* HAL tick at reset */
+
+/*---------------------------------------------------------------------------
+ * Forward declarations
+ *---------------------------------------------------------------------------*/
+
+static void system_init(void);
+static void uart_init(void);
+static void led_on(void);
+static void led_off(void);
+static void led_toggle(void);
+static uint32_t elapsed_ms(void);
+static void uart_send_frame(uint8_t cmd, const uint8_t *payload, uint16_t len);
+static void uart_send_nak(uint32_t expected_seq, uint32_t err_code);
+static void uart_send_chunk_ack(uint32_t seq);
+static void process_ota_begin(const ProtoFrame_t *f);
+static void process_ota_chunk(const ProtoFrame_t *f);
+static void process_ota_end(const ProtoFrame_t *f);
+static void process_ota_abort(void);
+static uint32_t compute_image_crc(void);
+
+/*---------------------------------------------------------------------------
+ * Flash operations in RAM (.ramfunc)
+ *---------------------------------------------------------------------------*/
+
+/**
+ * @brief Erase a single flash page. Runs from RAM.
+ */
+__attribute__((section(".ramfunc")))
+static uint32_t flash_erase_page(uint32_t page_addr) {
+    FLASH_EraseInitTypeDef erase_init = {
+        .TypeErase   = FLASH_TYPEERASE_PAGES,
+        .PageAddress = page_addr,
+        .NbPages     = 1
+    };
+    uint32_t page_error = 0;
+    HAL_StatusTypeDef status = HAL_FLASHEx_Erase(&erase_init, &page_error);
+    return (status == HAL_OK) ? 0 : page_error;
+}
+
+/**
+ * @brief Program a halfword to flash. Runs from RAM.
+ */
+__attribute__((section(".ramfunc")))
+static HAL_StatusTypeDef flash_program_halfword(uint32_t addr, uint16_t data) {
+    return HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD, addr, data);
+}
+
+/**
+ * @brief Erase all application pages (8..61).
+ */
+__attribute__((section(".ramfunc")))
+static bool flash_erase_app_region(void) {
+    for (uint32_t page = BOOTLOADER_PAGES; page < CONFIG_PAGE; page++) {
+        uint32_t addr = FLASH_BASE + (page * FLASH_PAGE_SIZE);
+        if (flash_erase_page(addr) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/*---------------------------------------------------------------------------
+ * Hardware init
+ *---------------------------------------------------------------------------*/
+
+static void system_init(void) {
+    HAL_Init();
+
+    /* Enable HSE and configure 72MHz system clock */
+    /* In a CubeIDE project this is generated as SystemClock_Config().
+     * For brevity, the minimal path is shown — in practice use CubeMX. */
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    __HAL_RCC_GPIOC_CLK_ENABLE();
+    __HAL_RCC_USART2_CLK_ENABLE();
+
+    /* LED PC13 */
+    GPIO_InitTypeDef gpio = {0};
+    gpio.Pin   = LED_PIN;
+    gpio.Mode  = GPIO_MODE_OUTPUT_PP;
+    gpio.Pull  = GPIO_NOPULL;
+    gpio.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(LED_PORT, &gpio);
+    led_off();
+
+    /* BOOT0 pin PB0 — input with pull-up */
+    gpio.Pin  = BOOT0_PIN;
+    gpio.Mode = GPIO_MODE_INPUT;
+    gpio.Pull = GPIO_PULLUP;
+    HAL_GPIO_Init(BOOT0_PORT, &gpio);
+}
+
+static void uart_init(void) {
+    g_huart2.Instance          = USART2;
+    g_huart2.Init.BaudRate     = USART_BAUD;
+    g_huart2.Init.WordLength   = UART_WORDLENGTH_8B;
+    g_huart2.Init.StopBits     = UART_STOPBITS_1;
+    g_huart2.Init.Parity       = UART_PARITY_NONE;
+    g_huart2.Init.Mode         = UART_MODE_TX_RX;
+    g_huart2.Init.HwFlowCtl    = UART_HWCONTROL_NONE;
+    g_huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+    HAL_UART_Init(&g_huart2);
+
+    /* Enable RXNE interrupt */
+    __HAL_UART_ENABLE_IT(&g_huart2, UART_IT_RXNE);
+    HAL_NVIC_SetPriority(USART2_IRQn, 2, 0);
+    HAL_NVIC_EnableIRQ(USART2_IRQn);
+}
+
+/*---------------------------------------------------------------------------
+ * LED helpers
+ *---------------------------------------------------------------------------*/
+
+static void led_on(void)  { HAL_GPIO_WritePin(LED_PORT, LED_PIN, GPIO_PIN_RESET); }
+static void led_off(void) { HAL_GPIO_WritePin(LED_PORT, LED_PIN, GPIO_PIN_SET); }
+static void led_toggle(void) { HAL_GPIO_TogglePin(LED_PORT, LED_PIN); }
+
+static uint32_t elapsed_ms(void) {
+    return HAL_GetTick() - g_ticks_at_boot;
+}
+
+/*---------------------------------------------------------------------------
+ * UART helpers
+ *---------------------------------------------------------------------------*/
+
+static void uart_send_byte(uint8_t byte) {
+    while (!(USART2->SR & USART_SR_TXE));
+    USART2->DR = byte;
+}
+
+static void uart_send_frame(uint8_t cmd, const uint8_t *payload, uint16_t len) {
+    uint16_t total = proto_build_frame(g_frame_buf, sizeof(g_frame_buf),
+                                       cmd, payload, len);
+    for (uint16_t i = 0; i < total; i++) {
+        uart_send_byte(g_frame_buf[i]);
+    }
+}
+
+static void uart_send_nak(uint32_t expected_seq, uint32_t err_code) {
+    uint8_t payload[8];
+    memcpy(payload, &expected_seq, 4);
+    memcpy(payload + 4, &err_code, 4);
+    uart_send_frame(CMD_NAK, payload, 8);
+}
+
+static void uart_send_chunk_ack(uint32_t seq) {
+    uart_send_frame(CMD_CHUNK_ACK, (const uint8_t *)&seq, 4);
+}
+
+/*---------------------------------------------------------------------------
+ * Application validation and jump
+ *---------------------------------------------------------------------------*/
+
+static bool app_is_valid(void) {
+    uint32_t sp  = *(volatile uint32_t *)APP_BASE;
+    uint32_t pc  = *(volatile uint32_t *)(APP_BASE + 4);
+
+    /* SP must point into SRAM: 0x20000000 – 0x20005000 (20KB) */
+    if (sp < 0x20000000U || sp > 0x20005000U) return false;
+
+    /* PC must be within app flash region and have bit 0 set (Thumb) */
+    if (pc < APP_BASE || pc > (APP_BASE + APP_SIZE)) return false;
+    if ((pc & 1) == 0) return false;
+
+    return true;
+}
+
+void bootloader_jump_to_app(void) {
+    /* Disable interrupts before jump */
+    __disable_irq();
+
+    /* Disable SysTick */
+    SysTick->CTRL = 0;
+
+    /* Disable all peripheral interrupts */
+    for (uint8_t i = 0; i < 8; i++) {
+        NVIC->ICER[i] = 0xFFFFFFFF;
+    }
+
+    /* Clear pending interrupts */
+    for (uint8_t i = 0; i < 8; i++) {
+        NVIC->ICPR[i] = 0xFFFFFFFF;
+    }
+
+    /* Reset USART2 to clean state for application */
+    USART2->CR1 = 0;
+
+    /* Set the vector table offset to application base */
+    SCB->VTOR = APP_BASE;
+
+    /* Set main stack pointer from application vector table */
+    __set_MSP(*(volatile uint32_t *)APP_BASE);
+
+    /* Jump to application reset handler */
+    void (*app_reset)(void) = (void (*)(void))(*(volatile uint32_t *)(APP_BASE + 4));
+    app_reset();
+
+    /* Never reached */
+    while (1);
+}
+
+void bootloader_reset(void) {
+    __disable_irq();
+    NVIC_SystemReset();
+    while (1);
+}
+
+void bootloader_halt_error(uint32_t code) {
+    __disable_irq();
+    while (1) {
+        /* Blink the error code on LED: N fast blinks, then pause */
+        for (uint32_t i = 0; i < code; i++) {
+            led_on();
+            for (volatile uint32_t d = 0; d < 200000; d++);
+            led_off();
+            for (volatile uint32_t d = 0; d < 200000; d++);
+        }
+        /* Long pause between repetitions */
+        for (volatile uint32_t d = 0; d < 2000000; d++);
+    }
+}
+
+/*---------------------------------------------------------------------------
+ * CRC over written image
+ *---------------------------------------------------------------------------*/
+
+static uint32_t compute_image_crc(void) {
+    uint32_t crc = 0xFFFFFFFFU;
+    const uint8_t *addr = (const uint8_t *)APP_BASE;
+    uint32_t remaining = g_ota.image_size;
+
+    while (remaining >= 4) {
+        uint32_t word = *(const volatile uint32_t *)addr;
+        crc = proto_crc32((const uint8_t *)&word, 4, crc);
+        addr += 4;
+        remaining -= 4;
+    }
+
+    /* Trailing bytes */
+    while (remaining > 0) {
+        crc = proto_crc32(addr, 1, crc);
+        addr++;
+        remaining--;
+    }
+
+    return crc ^ 0xFFFFFFFFU;
+}
+
+/*---------------------------------------------------------------------------
+ * OTA command handlers
+ *---------------------------------------------------------------------------*/
+
+static void process_ota_begin(const ProtoFrame_t *f) {
+    if (f->len < 12) {
+        uart_send_nak(0, ERR_UNKNOWN_CMD);
+        return;
+    }
+
+    memcpy(&g_ota.image_size,  f->payload,      4);
+    memcpy(&g_ota.version,     f->payload + 4,  4);
+    memcpy(&g_ota.image_crc32, f->payload + 8,  4);
+
+    /* Validate image fits in app region */
+    if (g_ota.image_size > APP_SIZE) {
+        uart_send_nak(0, ERR_SIZE_TOO_LARGE);
+        return;
+    }
+
+    /* Erase the entire application region */
+    HAL_FLASH_Unlock();
+    bool ok = flash_erase_app_region();
+    HAL_FLASH_Lock();
+
+    if (!ok) {
+        uart_send_nak(0, ERR_FLASH_ERASE);
+        return;
+    }
+
+    g_ota.expected_seq  = 0;
+    g_ota.bytes_written = 0;
+    g_state = ST_OTA_ACTIVE;
+
+    uart_send_frame(CMD_OTA_BEGIN_ACK, (const uint8_t *)&g_ota.expected_seq, 4);
+}
+
+static void process_ota_chunk(const ProtoFrame_t *f) {
+    if (g_state != ST_OTA_ACTIVE) {
+        uart_send_nak(0, ERR_BUSY);
+        return;
+    }
+
+    if (f->len < 4) {
+        uart_send_nak(g_ota.expected_seq, ERR_UNKNOWN_CMD);
+        return;
+    }
+
+    uint32_t seq;
+    memcpy(&seq, f->payload, 4);
+
+    if (seq != g_ota.expected_seq) {
+        uart_send_nak(g_ota.expected_seq, ERR_SEQ_MISMATCH);
+        return;
+    }
+
+    uint32_t addr = APP_BASE + (seq * FLASH_PAGE_SIZE);
+    uint16_t data_len = f->len - 4; /* payload after seq */
+
+    if (data_len > FLASH_PAGE_SIZE) {
+        uart_send_nak(g_ota.expected_seq, ERR_SIZE_TOO_LARGE);
+        return;
+    }
+
+    /* Program this page */
+    HAL_FLASH_Unlock();
+
+    /* Erase the target page first */
+    if (flash_erase_page(addr) != 0) {
+        HAL_FLASH_Lock();
+        uart_send_nak(g_ota.expected_seq, ERR_FLASH_ERASE);
+        return;
+    }
+
+    /* Write data as halfwords */
+    const uint8_t *data = f->payload + 4;
+    for (uint16_t i = 0; i < data_len; i += 2) {
+        uint16_t hw;
+
+        if (i + 1 < data_len) {
+            hw = data[i] | ((uint16_t)data[i + 1] << 8);
+        } else {
+            /* Last odd byte: pad with 0xFF */
+            hw = data[i] | 0xFF00;
+        }
+
+        if (flash_program_halfword(addr + i, hw) != HAL_OK) {
+            HAL_FLASH_Lock();
+            uart_send_nak(g_ota.expected_seq, ERR_FLASH_PROGRAM);
+            return;
+        }
+    }
+
+    HAL_FLASH_Lock();
+
+    g_ota.bytes_written += data_len;
+    g_ota.expected_seq++;
+
+    uart_send_chunk_ack(seq);
+}
+
+static void process_ota_end(const ProtoFrame_t *f) {
+    if (g_state != ST_OTA_ACTIVE) {
+        uart_send_nak(0, ERR_BUSY);
+        return;
+    }
+
+    g_state = ST_OTA_VERIFY;
+
+    /* Compute CRC-32 over the written image */
+    uint32_t computed_crc = compute_image_crc();
+
+    uint8_t result_payload[8];
+    if (computed_crc == g_ota.image_crc32) {
+        /* Success: mark config and jump */
+        g_state = ST_OTA_DONE;
+
+        if (!ota_config_mark_valid(g_ota.version, g_ota.image_size, g_ota.image_crc32)) {
+            ota_config_mark_failed();
+            uint32_t ok = OTA_RESULT_FAIL;
+            memcpy(result_payload, &ok, 4);
+            memcpy(result_payload + 4, &g_ota.version, 4);
+            uart_send_frame(CMD_OTA_RESULT, result_payload, 8);
+            bootloader_halt_error(3);
+        }
+
+        uint32_t ok = OTA_RESULT_OK;
+        memcpy(result_payload, &ok, 4);
+        memcpy(result_payload + 4, &g_ota.version, 4);
+        uart_send_frame(CMD_OTA_RESULT, result_payload, 8);
+
+        /* Brief delay so ESP32 can receive the ACK */
+        HAL_Delay(100);
+
+        /* Jump to the new application */
+        bootloader_jump_to_app();
+    } else {
+        /* CRC mismatch */
+        g_state = ST_ERROR;
+        ota_config_mark_failed();
+
+        uint32_t ok = OTA_RESULT_FAIL;
+        memcpy(result_payload, &ok, 4);
+        memcpy(result_payload + 4, &g_ota.version, 4);
+        uart_send_frame(CMD_OTA_RESULT, result_payload, 8);
+
+        bootloader_halt_error(4);
+    }
+}
+
+static void process_ota_abort(void) {
+    g_state = ST_ERROR;
+    ota_config_mark_failed();
+    uart_send_frame(CMD_NAK, NULL, 0);
+    bootloader_reset();
+}
+
+/*---------------------------------------------------------------------------
+ * OTA window: wait for UART bytes with timeout
+ *---------------------------------------------------------------------------*/
+
+/**
+ * @brief Try to read a byte from UART2 (non-blocking).
+ * @return true if a byte was read into *byte.
+ */
+static bool uart_read_byte_nonblock(uint8_t *byte) {
+    if (USART2->SR & USART_SR_RXNE) {
+        *byte = (uint8_t)(USART2->DR & 0xFF);
+        return true;
+    }
+    return false;
+}
+
+/**
+ * @brief Wait up to `timeout_ms` for a complete valid frame.
+ * @return Pointer to frame if received, NULL on timeout.
+ */
+static const ProtoFrame_t *wait_for_frame(uint32_t timeout_ms) {
+    uint32_t start = elapsed_ms();
+    uint8_t byte;
+
+    while (elapsed_ms() - start < timeout_ms) {
+        if (uart_read_byte_nonblock(&byte)) {
+            const ProtoFrame_t *f = proto_parser_feed(&g_parser, byte);
+            if (f != NULL) {
+                return f;
+            }
+        }
+    }
+
+    return NULL;
+}
+
+/*---------------------------------------------------------------------------
+ * Main bootloader loop
+ *---------------------------------------------------------------------------*/
+
+void bootloader_run(void) {
+    g_ticks_at_boot = HAL_GetTick();
+    proto_parser_init(&g_parser);
+    memset(&g_ota, 0, sizeof(g_ota));
+
+    /* --- Boot decision --- */
+
+    /* 1. Check config for pending OTA request */
+    BootConfig_t cfg;
+    bool cfg_valid = ota_config_read(&cfg);
+
+    /* 2. Check BOOT0 pin (PB0 low = force bootloader) */
+    bool boot0_asserted = (HAL_GPIO_ReadPin(BOOT0_PORT, BOOT0_PIN) == GPIO_PIN_RESET);
+
+    if (cfg_valid && cfg.boot_mode == BOOT_MODE_OTA) {
+        /* Application requested OTA — enter OTA mode with a longer window */
+        g_state = ST_WAIT_HANDSHAKE;
+        led_on(); /* Solid LED = OTA mode */
+    } else if (boot0_asserted) {
+        /* Hardware forced bootloader entry */
+        g_state = ST_MAINTENANCE;
+        led_on();
+    } else {
+        /* Normal boot: give ESP32 a short window to initiate OTA */
+        g_state = ST_WAIT_HANDSHAKE;
+    }
+
+    /* --- OTA handshake window --- */
+
+    if (g_state == ST_WAIT_HANDSHAKE) {
+        uint32_t window = cfg_valid && cfg.boot_mode == BOOT_MODE_OTA
+                          ? 2000U    /* 2s when OTA was explicitly requested */
+                          : OTA_WINDOW_MS;  /* 200ms passive window */
+
+        const ProtoFrame_t *f = wait_for_frame(window);
+
+        if (f != NULL && f->cmd == CMD_OTA_BEGIN) {
+            process_ota_begin(f);
+        } else if (f != NULL && f->cmd == CMD_GET_STATUS) {
+            /* ESP32 is polling — stay in bootloader */
+            uint32_t status = (cfg_valid && cfg.boot_mode == BOOT_MODE_OTA)
+                              ? BOOT_MODE_OTA : BOOT_MODE_APP;
+            uart_send_frame(CMD_STATUS_RSP, (const uint8_t *)&status, 4);
+            /* Stay and wait again */
+            f = wait_for_frame(5000U);
+            if (f != NULL && f->cmd == CMD_OTA_BEGIN) {
+                process_ota_begin(f);
+            }
+        } else if (g_state == ST_WAIT_HANDSHAKE) {
+            /* Timeout — jump to app if valid, otherwise stay */
+            if (!cfg_valid || cfg.boot_mode == BOOT_MODE_OTA) {
+                /* OTA was requested but ESP32 never responded.
+                 * In a production system, retry or fall back.
+                 * For prototype: jump to existing app if valid. */
+                if (app_is_valid()) {
+                    bootloader_jump_to_app();
+                }
+                /* No valid app, stay in bootloader */
+                g_state = ST_MAINTENANCE;
+            } else {
+                if (app_is_valid()) {
+                    bootloader_jump_to_app();
+                }
+                g_state = ST_MAINTENANCE;
+            }
+        }
+    }
+
+    /* --- OTA active loop --- */
+
+    if (g_state == ST_OTA_ACTIVE) {
+        /* Process chunks until done or timeout */
+        uint32_t idle_start = elapsed_ms();
+
+        while (g_state == ST_OTA_ACTIVE) {
+            const ProtoFrame_t *f = wait_for_frame(1000U); /* 1s between chunks */
+
+            if (f == NULL) {
+                /* 30s total inactivity timeout */
+                if (elapsed_ms() - idle_start > 30000U) {
+                    ota_config_mark_failed();
+                    bootloader_reset();
+                }
+                continue;
+            }
+
+            idle_start = elapsed_ms(); /* Reset inactivity timer */
+
+            switch (f->cmd) {
+            case CMD_OTA_CHUNK:
+                process_ota_chunk(f);
+                break;
+            case CMD_OTA_END:
+                process_ota_end(f);
+                break;
+            case CMD_OTA_ABORT:
+                process_ota_abort();
+                break;
+            default:
+                uart_send_nak(g_ota.expected_seq, ERR_UNKNOWN_CMD);
+                break;
+            }
+        }
+    }
+
+    /* --- Maintenance mode --- */
+
+    if (g_state == ST_MAINTENANCE) {
+        /* Stay in bootloader, accept manual commands */
+        led_off();
+        while (1) {
+            /* Heartbeat blink */
+            led_toggle();
+            for (volatile uint32_t d = 0; d < 1000000; d++);
+
+            /* Check for incoming frames */
+            const ProtoFrame_t *f = wait_for_frame(500U);
+            if (f != NULL) {
+                switch (f->cmd) {
+                case CMD_OTA_BEGIN:
+                    process_ota_begin(f);
+                    goto ota_active;
+                    break;
+                case CMD_GET_STATUS:
+                    {
+                        uint32_t status = 0;
+                        uart_send_frame(CMD_STATUS_RSP, (const uint8_t *)&status, 4);
+                    }
+                    break;
+                case CMD_RESET:
+                    bootloader_reset();
+                    break;
+                default:
+                    break;
+                }
+            }
+        }
+ota_active:
+        /* Fall through to the OTA active loop above */
+        if (g_state == ST_OTA_ACTIVE) {
+            uint32_t idle_start = elapsed_ms();
+            while (g_state == ST_OTA_ACTIVE) {
+                const ProtoFrame_t *f = wait_for_frame(1000U);
+                if (f == NULL) {
+                    if (elapsed_ms() - idle_start > 30000U) {
+                        ota_config_mark_failed();
+                        bootloader_reset();
+                    }
+                    continue;
+                }
+                idle_start = elapsed_ms();
+
+                switch (f->cmd) {
+                case CMD_OTA_CHUNK: process_ota_chunk(f); break;
+                case CMD_OTA_END:   process_ota_end(f);   break;
+                case CMD_OTA_ABORT: process_ota_abort();  break;
+                default: uart_send_nak(g_ota.expected_seq, ERR_UNKNOWN_CMD); break;
+                }
+            }
+        }
+    }
+
+    /* Should not reach here — but if we do, jump to app or halt */
+    if (app_is_valid()) {
+        bootloader_jump_to_app();
+    }
+    bootloader_halt_error(1);
+}
+
+/*---------------------------------------------------------------------------
+ * UART RX interrupt handler
+ *---------------------------------------------------------------------------*/
+
+void USART2_IRQHandler(void) {
+    /* RXNE: byte received */
+    if (USART2->SR & USART_SR_RXNE) {
+        uint8_t byte = (uint8_t)(USART2->DR & 0xFF);
+
+        /* Feed parser directly in ISR — keeps it simple in the bootloader
+         * since there's no RTOS to defer to. Parser state is purely CPU-bound. */
+        proto_parser_feed(&g_parser, byte);
+    }
+
+    /* Overrun error: clear by reading DR + SR */
+    if (USART2->SR & USART_SR_ORE) {
+        (void)USART2->DR;
+    }
+}
+
+/*---------------------------------------------------------------------------
+ * HAL UART MSP init callback (called by HAL_UART_Init)
+ *---------------------------------------------------------------------------*/
+
+void HAL_UART_MspInit(UART_HandleTypeDef *huart) {
+    if (huart->Instance == USART2) {
+        GPIO_InitTypeDef gpio = {0};
+
+        __HAL_RCC_GPIOA_CLK_ENABLE();
+
+        /* PA2 = TX, PA3 = RX */
+        gpio.Pin       = GPIO_PIN_2 | GPIO_PIN_3;
+        gpio.Mode      = GPIO_MODE_AF_PP;
+        gpio.Pull      = GPIO_NOPULL;
+        gpio.Speed     = GPIO_SPEED_FREQ_HIGH;
+        HAL_GPIO_Init(GPIOA, &gpio);
+    }
+}
+
+/*---------------------------------------------------------------------------
+ * main entry point
+ *---------------------------------------------------------------------------*/
+
+int main(void) {
+    system_init();
+
+    /* Configure system clock (generated by CubeMX in real project) */
+    /* SystemClock_Config(); */
+
+    uart_init();
+    proto_parser_init(&g_parser);
+
+    /* Run the bootloader — does not return */
+    bootloader_run();
+
+    /* Unreachable */
+    return 0;
+}
