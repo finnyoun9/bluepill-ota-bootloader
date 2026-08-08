@@ -42,6 +42,7 @@
 #include "esp_bt_main.h"
 #include "esp_spp_api.h"
 #include "esp_bt_device.h"
+#include "esp_gap_bt_api.h"   /* esp_bt_gap_set_device_name (IDF 6) */
 
 #include "esp_wifi.h"
 #include "esp_http_client.h"
@@ -121,7 +122,6 @@ static void uart_stm32_init(void);
 static void bt_spp_init(void);
 static void wifi_init_sta(void);
 static void wifi_connect(const char *ssid, const char *password);
-static void orchestrator_task(void *pv);
 static void bt_recv_task(void *pv);
 static bool download_firmware_http(const char *url);
 static bool transfer_to_stm32(void);
@@ -131,14 +131,13 @@ static bool transfer_to_stm32(void);
  *---------------------------------------------------------------------------*/
 
 static void uart_stm32_init(void) {
-    const uart_config_t uart_config = {
-        .baud_rate  = UART_STM32_BAUD,
-        .data_bits  = UART_DATA_8_BITS,
-        .parity     = UART_PARITY_DISABLE,
-        .stop_bits  = UART_STOP_BITS_1,
-        .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,
-        .source_clk = UART_SCLK_APB,
-    };
+    uart_config_t uart_config = {};
+    uart_config.baud_rate  = UART_STM32_BAUD;
+    uart_config.data_bits  = UART_DATA_8_BITS;
+    uart_config.parity     = UART_PARITY_DISABLE;
+    uart_config.stop_bits  = UART_STOP_BITS_1;
+    uart_config.flow_ctrl  = UART_HW_FLOWCTRL_DISABLE;
+    uart_config.source_clk = UART_SCLK_APB;
 
     ESP_ERROR_CHECK(uart_driver_install(UART_STM32_NUM,
                                          UART_STM32_BUF_SIZE,
@@ -266,10 +265,13 @@ static void bt_spp_init(void) {
     ESP_ERROR_CHECK(esp_bluedroid_init());
     ESP_ERROR_CHECK(esp_bluedroid_enable());
     ESP_ERROR_CHECK(esp_spp_register_callback(spp_callback));
-    ESP_ERROR_CHECK(esp_spp_init(ESP_SPP_MODE_CB));
 
-    /* Set discoverable device name */
-    esp_bt_dev_set_device_name(SPP_SERVER_NAME);
+    esp_spp_cfg_t spp_cfg = {};
+    spp_cfg.mode = ESP_SPP_MODE_CB;
+    ESP_ERROR_CHECK(esp_spp_enhanced_init(&spp_cfg));
+
+    /* Set discoverable device name (IDF 6 API) */
+    ESP_ERROR_CHECK(esp_bt_gap_set_device_name(SPP_SERVER_NAME));
 }
 
 /**
@@ -389,6 +391,8 @@ static void bt_recv_task(void *pv) {
                     }
 
                 } else if (strncmp(cmd, "STATUS", 6) == 0 || strncmp(cmd, "status", 6) == 0) {
+                    wifi_ap_record_t ap_info;
+                    bool wifi_connected = (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK);
                     char buf[160];
                     snprintf(buf, sizeof(buf),
                              "Bridge Status:\r\n"
@@ -398,7 +402,7 @@ static void bt_recv_task(void *pv) {
                              "  Staged size: %lu bytes\r\n"
                              "  Staged version: %lu\r\n",
                              g_spp_handle ? "yes" : "no",
-                             esp_wifi_is_connected() ? "yes" : "no",
+                             wifi_connected ? "yes" : "no",
                              g_fw_staged ? "yes" : "no",
                              g_fw_size,
                              g_fw_version);
@@ -441,7 +445,7 @@ static void bt_recv_task(void *pv) {
  *---------------------------------------------------------------------------*/
 
 static void wifi_connect(const char *ssid, const char *password) {
-    wifi_config_t wifi_cfg = {0};
+    wifi_config_t wifi_cfg = {};
     strncpy((char *)wifi_cfg.sta.ssid, ssid, sizeof(wifi_cfg.sta.ssid) - 1);
     strncpy((char *)wifi_cfg.sta.password, password, sizeof(wifi_cfg.sta.password) - 1);
     wifi_cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
@@ -643,9 +647,7 @@ static bool transfer_to_stm32(void) {
                     acked = true;
                 }
             } else {
-                /* Check for NAK */
-                ProtoFrame_t nak_resp;
-                /* Already consumed in stm32_wait_cmd; retry */
+                /* NAK/timeout already consumed inside stm32_wait_cmd; retry */
                 ESP_LOGW(TAG, "Chunk %lu: retry %d", seq, retry + 1);
             }
         }

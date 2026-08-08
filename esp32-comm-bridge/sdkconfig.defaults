@@ -1,0 +1,12 @@
+# Enable Bluetooth Classic (Bluedroid) + SPP for the STM32 bridge.
+# PlatformIO's -D CONFIG_BT_* build flags do NOT enable the bt component;
+# ESP-IDF component selection is driven by these Kconfig settings.
+
+CONFIG_BT_ENABLED=y
+CONFIG_BT_BLUEDROID_ENABLED=y
+CONFIG_BT_CLASSIC_ENABLED=y
+CONFIG_BT_SPP_ENABLED=y
+
+CONFIG_BT_CONTROLLER_ENABLED=y
+CONFIG_BTDM_CTRL_MODE_BTDM=y
+CONFIG_BTDM_CTRL_BLE_MAX_CONN=0
