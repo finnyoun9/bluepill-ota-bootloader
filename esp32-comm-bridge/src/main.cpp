@@ -11,15 +11,19 @@
  *   - Orchestrator: manages firmware staging (SPIFFS) and transfer state.
  *
  * Text commands over BT SPP:
- *   OTA <url>       Download firmware from URL, then transfer to STM32
- *   VERSION         Query STM32 firmware version
- *   STATUS          Show current bridge status
- *   RESET           Software reset the ESP32
+ *   OTA <url>          Download firmware from URL, then transfer to STM32
+ *   FW <ver>,<crc32>   Begin a Bluetooth firmware push (reset receive state)
+ *   SEND               Transfer the staged firmware to STM32
+ *   WIFI <ssid>,<pass> Configure WiFi credentials (NVS) and reconnect
+ *   VERSION            Query STM32 firmware version
+ *   STATUS             Show current bridge status
+ *   RESET              Software reset the ESP32
  */
 
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <sys/stat.h>
 
 #include "freertos/FreeRTOS.h"
@@ -82,12 +86,28 @@ static const char *TAG = "bridge";
 /* WiFi OTA download buffer */
 #define HTTP_DOWNLOAD_BUF_SIZE  4096
 
+/* WiFi credentials — override at compile time via -D WIFI_SSID/-D WIFI_PASSWORD,
+ * or at runtime via the "WIFI <ssid>,<pass>" BT command (stored in NVS). */
+#ifndef WIFI_SSID
+#define WIFI_SSID     "YOUR_SSID"
+#endif
+#ifndef WIFI_PASSWORD
+#define WIFI_PASSWORD "YOUR_PASSWORD"
+#endif
+
 /*---------------------------------------------------------------------------
  * Global state
  *---------------------------------------------------------------------------*/
 
 static uint32_t        g_spp_handle = 0;
-static QueueHandle_t   g_spp_queue;       /* received bytes from BT */
+static QueueHandle_t   g_spp_queue;       /* received SPP data (ptr + len) */
+
+/* SPP data item carried through the queue. Keeps the real length so binary
+ * firmware chunks with embedded NUL bytes survive intact. */
+typedef struct {
+    uint8_t *data;
+    size_t   len;
+} SppData_t;
 static bool            g_fw_staged = false;
 static uint32_t        g_fw_size = 0;
 static uint32_t        g_fw_version = 0;
@@ -100,6 +120,7 @@ static uint32_t        g_fw_crc32 = 0;
 static void uart_stm32_init(void);
 static void bt_spp_init(void);
 static void wifi_init_sta(void);
+static void wifi_connect(const char *ssid, const char *password);
 static void orchestrator_task(void *pv);
 static void bt_recv_task(void *pv);
 static bool download_firmware_http(const char *url);
@@ -216,14 +237,16 @@ static void spp_callback(esp_spp_cb_event_t event, esp_spp_cb_param_t *param) {
         break;
 
     case ESP_SPP_DATA_IND_EVT:
-        /* Forward received BT data to bt_recv_task via queue */
+        /* Forward received BT data to bt_recv_task via queue.
+         * Carries length explicitly: binary firmware chunks may contain
+         * embedded NUL bytes, so strlen() is not usable. */
         if (param->data_ind.len > 0) {
-            /* Send pointer + length through queue.
-             * The bt_recv_task should free the data with free(). */
-            uint8_t *copy = (uint8_t *)malloc(param->data_ind.len);
+            uint8_t *copy = (uint8_t *)malloc(param->data_ind.len + 1);
             if (copy) {
                 memcpy(copy, param->data_ind.data, param->data_ind.len);
-                xQueueSend(g_spp_queue, &copy, 0);
+                copy[param->data_ind.len] = '\0';
+                SppData_t item = { .data = copy, .len = param->data_ind.len };
+                xQueueSend(g_spp_queue, &item, 0);
             }
         }
         break;
@@ -234,7 +257,7 @@ static void spp_callback(esp_spp_cb_event_t event, esp_spp_cb_param_t *param) {
 }
 
 static void bt_spp_init(void) {
-    g_spp_queue = xQueueCreate(32, sizeof(uint8_t *));
+    g_spp_queue = xQueueCreate(32, sizeof(SppData_t));
 
     ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_BLE));
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
@@ -270,23 +293,25 @@ static void bt_spp_print(const char *msg) {
  *---------------------------------------------------------------------------*/
 
 static void bt_recv_task(void *pv) {
-    uint8_t *data;
+    SppData_t item;
 
     for (;;) {
-        if (xQueueReceive(g_spp_queue, &data, portMAX_DELAY) == pdPASS) {
-            /* Check if it's a text command or binary firmware data */
-            size_t len = strlen((char *)data);
+        if (xQueueReceive(g_spp_queue, &item, portMAX_DELAY) == pdPASS) {
+            uint8_t *data = item.data;
+            size_t   len  = item.len;
 
             /* Simple text command detection: starts with ASCII letter */
             if (len > 0 && data[0] >= 'A' && data[0] <= 'Z') {
                 char cmd[256] = {0};
-                memcpy(cmd, data, len < sizeof(cmd) - 1 ? len : sizeof(cmd) - 1);
+                size_t n = len < sizeof(cmd) - 1 ? len : sizeof(cmd) - 1;
+                memcpy(cmd, data, n);
+                cmd[n] = '\0';
 
                 ESP_LOGI(TAG, "BT cmd: %s", cmd);
 
-                if (strncmp(cmd, "OTA http", 8) == 0 || strncmp(cmd, "ota http", 8) == 0) {
-                    /* Extract URL */
-                    char *url = cmd + 4; /* skip "OTA " */
+                if (strncmp(cmd, "OTA ", 4) == 0 || strncmp(cmd, "ota ", 4) == 0) {
+                    /* Extract URL (http:// or https://) */
+                    char *url = cmd + 4;
                     while (*url == ' ') url++;
 
                     bt_spp_print("STATUS: Downloading firmware...\r\n");
@@ -300,6 +325,53 @@ static void bt_recv_task(void *pv) {
                         }
                     } else {
                         bt_spp_print("STATUS: Download failed\r\n");
+                    }
+
+                } else if (strncmp(cmd, "FW ", 3) == 0 || strncmp(cmd, "fw ", 3) == 0) {
+                    /* Begin a Bluetooth firmware push: FW <version>,<crc32 hex>
+                     * Resets receive state; sender then streams binary chunks
+                     * (which the else-branch appends) and finally issues SEND. */
+                    unsigned long ver = 0, crc = 0;
+                    if (sscanf(cmd + 3, "%lu,%lx", &ver, &crc) == 2) {
+                        g_fw_version = (uint32_t)ver;
+                        g_fw_crc32   = (uint32_t)crc;
+                        g_fw_staged  = false;
+                        g_fw_size    = 0;
+                        unlink(FW_FILE_PATH);   /* start fresh */
+                        bt_spp_print("FW: ready, send binary data then SEND\r\n");
+                    } else {
+                        bt_spp_print("FW: usage FW <version>,<crc32-hex>\r\n");
+                    }
+
+                } else if (strncmp(cmd, "SEND", 4) == 0 || strncmp(cmd, "send", 4) == 0) {
+                    /* Transfer the staged (Bluetooth-pushed) firmware */
+                    if (g_fw_staged) {
+                        bt_spp_print("STATUS: Transferring...\r\n");
+                        if (transfer_to_stm32()) {
+                            bt_spp_print("STATUS: OTA complete!\r\n");
+                        } else {
+                            bt_spp_print("STATUS: Transfer failed\r\n");
+                        }
+                    } else {
+                        bt_spp_print("STATUS: No firmware staged (use FW <ver>,<crc> then binary)\r\n");
+                    }
+
+                } else if (strncmp(cmd, "WIFI ", 5) == 0 || strncmp(cmd, "wifi ", 5) == 0) {
+                    /* WIFI <ssid>,<password> — store to NVS and reconnect */
+                    char ssid[33] = {0};
+                    char pass[65] = {0};
+                    if (sscanf(cmd + 5, "%32[^,],%64s", ssid, pass) == 2) {
+                        nvs_handle_t h;
+                        if (nvs_open("cfg", NVS_READWRITE, &h) == ESP_OK) {
+                            nvs_set_str(h, "wifi_ssid", ssid);
+                            nvs_set_str(h, "wifi_pass", pass);
+                            nvs_commit(h);
+                            nvs_close(h);
+                        }
+                        wifi_connect(ssid, pass);
+                        bt_spp_print("WIFI: saved and reconnecting\r\n");
+                    } else {
+                        bt_spp_print("WIFI: usage WIFI <ssid>,<password>\r\n");
                     }
 
                 } else if (strncmp(cmd, "VERSION", 7) == 0 || strncmp(cmd, "version", 7) == 0) {
@@ -317,15 +389,19 @@ static void bt_recv_task(void *pv) {
                     }
 
                 } else if (strncmp(cmd, "STATUS", 6) == 0 || strncmp(cmd, "status", 6) == 0) {
-                    char buf[128];
+                    char buf[160];
                     snprintf(buf, sizeof(buf),
                              "Bridge Status:\r\n"
                              "  BT connected: %s\r\n"
+                             "  WiFi connected: %s\r\n"
                              "  FW staged: %s\r\n"
-                             "  Staged size: %lu bytes\r\n",
+                             "  Staged size: %lu bytes\r\n"
+                             "  Staged version: %lu\r\n",
                              g_spp_handle ? "yes" : "no",
+                             esp_wifi_is_connected() ? "yes" : "no",
                              g_fw_staged ? "yes" : "no",
-                             g_fw_size);
+                             g_fw_size,
+                             g_fw_version);
                     bt_spp_print(buf);
 
                 } else if (strncmp(cmd, "RESET", 5) == 0 || strncmp(cmd, "reset", 5) == 0) {
@@ -334,12 +410,13 @@ static void bt_recv_task(void *pv) {
                     esp_restart();
 
                 } else {
-                    bt_spp_print("Unknown command. Commands: OTA <url>, VERSION, STATUS, RESET\r\n");
+                    bt_spp_print("Unknown command. Commands: OTA <url>, FW <ver>,<crc>, SEND, WIFI <ssid>,<pass>, VERSION, STATUS, RESET\r\n");
                 }
             } else {
                 /* Binary data — firmware file being pushed over SPP.
-                 * Write to SPIFFS file. This is a simplified single-file
-                 * receive; the user appends each chunk to /spiffs/fw.bin */
+                 * Append to /spiffs/fw.bin. Assumes FW <ver>,<crc> was
+                 * issued first. Uses item.len, not strlen: firmware images
+                 * contain NUL bytes. */
                 FILE *f = fopen(FW_FILE_PATH, "ab");
                 if (f) {
                     fwrite(data, 1, len, f);
@@ -363,24 +440,56 @@ static void bt_recv_task(void *pv) {
  * WiFi HTTP firmware download
  *---------------------------------------------------------------------------*/
 
+static void wifi_connect(const char *ssid, const char *password) {
+    wifi_config_t wifi_cfg = {0};
+    strncpy((char *)wifi_cfg.sta.ssid, ssid, sizeof(wifi_cfg.sta.ssid) - 1);
+    strncpy((char *)wifi_cfg.sta.password, password, sizeof(wifi_cfg.sta.password) - 1);
+    wifi_cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
+    ESP_LOGI(TAG, "WiFi connecting to %s...", ssid);
+    esp_wifi_connect();
+}
+
 static void wifi_init_sta(void) {
-    /* Use hardcoded credentials for prototype — replace with NVS config */
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-
-    wifi_config_t wifi_cfg = {
-        .sta = {
-            .ssid = "YOUR_SSID",
-            .password = "YOUR_PASSWORD",
-        },
-    };
-
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "WiFi connecting...");
-    ESP_ERROR_CHECK(esp_wifi_connect());
+    /* Credentials: runtime-configured via the "WIFI" BT command (NVS),
+     * falling back to compile-time defaults above. */
+    nvs_handle_t h;
+    char ssid[33] = {0};
+    char pass[65] = {0};
+    if (nvs_open("cfg", NVS_READONLY, &h) == ESP_OK) {
+        size_t slen = sizeof(ssid), plen = sizeof(pass);
+        nvs_get_str(h, "wifi_ssid", ssid, &slen);
+        nvs_get_str(h, "wifi_pass", pass, &plen);
+        nvs_close(h);
+    }
+    if (ssid[0] == '\0') strncpy(ssid, WIFI_SSID, sizeof(ssid) - 1);
+    if (pass[0] == '\0') strncpy(pass, WIFI_PASSWORD, sizeof(pass) - 1);
+
+    wifi_connect(ssid, pass);
+}
+
+/*---------------------------------------------------------------------------
+ * Firmware version from URL filename
+ *---------------------------------------------------------------------------*/
+
+/**
+ * @brief Parse the firmware version from a URL like ".../fw_v2.bin".
+ *        Falls back to version 1 when the pattern is not found.
+ */
+static uint32_t parse_version_from_url(const char *url) {
+    const char *name = strrchr(url, '/');
+    name = (name != NULL) ? name + 1 : url;
+
+    if (strncmp(name, "fw_v", 4) == 0) {
+        return (uint32_t)strtoul(name + 4, NULL, 10);
+    }
+    return 1U;
 }
 
 static bool download_firmware_http(const char *url) {
@@ -451,9 +560,8 @@ static bool download_firmware_http(const char *url) {
     fclose(f);
     g_fw_crc32 = crc ^ 0xFFFFFFFFU;
 
-    /* Extract version from filename or use timestamp.
-     * For a real system, version should be in a manifest or header. */
-    g_fw_version = (uint32_t)time(NULL);
+    /* Derive version from the URL filename (fw_v<N>.bin); default 1. */
+    g_fw_version = parse_version_from_url(url);
 
     g_fw_staged = true;
 
