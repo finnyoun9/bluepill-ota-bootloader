@@ -42,12 +42,20 @@ static OtaContext_t           g_ota;
 static uint8_t               g_frame_buf[PROTO_MAX_FRAME];
 static uint32_t              g_ticks_at_boot;  /* HAL tick at reset */
 
+/* The vendor startup file initializes .data/.bss only. The linker places
+ * flash-writing routines in .ramfunc, so copy that image explicitly before
+ * any OTA flash operation can run. */
+extern uint8_t _siramfunc;
+extern uint8_t _sramfunc;
+extern uint8_t _eramfunc;
+
 /*---------------------------------------------------------------------------
  * Forward declarations
  *---------------------------------------------------------------------------*/
 
 static void system_init(void);
 static void SystemClock_Config(void);
+static void ramfunc_init(void);
 static void uart_init(void);
 static void led_on(void);
 static void led_off(void);
@@ -69,7 +77,7 @@ static uint32_t compute_image_crc(void);
 /**
  * @brief Erase a single flash page. Runs from RAM.
  */
-__attribute__((section(".ramfunc")))
+__attribute__((section(".ramfunc"), noinline))
 static uint32_t flash_erase_page(uint32_t page_addr) {
     FLASH_EraseInitTypeDef erase_init = {
         .TypeErase   = FLASH_TYPEERASE_PAGES,
@@ -84,28 +92,23 @@ static uint32_t flash_erase_page(uint32_t page_addr) {
 /**
  * @brief Program a halfword to flash. Runs from RAM.
  */
-__attribute__((section(".ramfunc")))
+__attribute__((section(".ramfunc"), noinline))
 static HAL_StatusTypeDef flash_program_halfword(uint32_t addr, uint16_t data) {
     return HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD, addr, data);
-}
-
-/**
- * @brief Erase all application pages (8..61).
- */
-__attribute__((section(".ramfunc")))
-static bool flash_erase_app_region(void) {
-    for (uint32_t page = BOOTLOADER_PAGES; page < CONFIG_PAGE; page++) {
-        uint32_t addr = FLASH_BASE + (page * FLASH_PAGE_SIZE);
-        if (flash_erase_page(addr) != 0) {
-            return false;
-        }
-    }
-    return true;
 }
 
 /*---------------------------------------------------------------------------
  * Hardware init
  *---------------------------------------------------------------------------*/
+
+static void ramfunc_init(void) {
+    const uint8_t *src = &_siramfunc;
+    uint8_t *dst = &_sramfunc;
+
+    while (dst < &_eramfunc) {
+        *dst++ = *src++;
+    }
+}
 
 static void system_init(void) {
     HAL_Init();
@@ -168,10 +171,9 @@ static void uart_init(void) {
     g_huart2.Init.OverSampling = UART_OVERSAMPLING_16;
     HAL_UART_Init(&g_huart2);
 
-    /* Enable RXNE interrupt */
-    __HAL_UART_ENABLE_IT(&g_huart2, UART_IT_RXNE);
-    HAL_NVIC_SetPriority(USART1_IRQn, 2, 0);
-    HAL_NVIC_EnableIRQ(USART1_IRQn);
+    /* The bootloader receives synchronously in wait_for_frame(). Do not
+     * enable RX interrupts: an ISR would consume DR before that polling
+     * state machine sees the completed frame. */
 }
 
 /*---------------------------------------------------------------------------
@@ -296,7 +298,7 @@ void bootloader_halt_error(uint32_t code) {
  *---------------------------------------------------------------------------*/
 
 static uint32_t compute_image_crc(void) {
-    uint32_t crc = 0xFFFFFFFFU;
+    uint32_t crc = 0U;
     const uint8_t *addr = (const uint8_t *)APP_BASE;
     uint32_t remaining = g_ota.image_size;
 
@@ -314,7 +316,7 @@ static uint32_t compute_image_crc(void) {
         remaining--;
     }
 
-    return crc ^ 0xFFFFFFFFU;
+    return crc;
 }
 
 /*---------------------------------------------------------------------------
@@ -332,18 +334,8 @@ static void process_ota_begin(const ProtoFrame_t *f) {
     memcpy(&g_ota.image_crc32, f->payload + 8,  4);
 
     /* Validate image fits in app region */
-    if (g_ota.image_size > APP_SIZE) {
+    if (g_ota.image_size == 0 || g_ota.image_size > APP_SIZE) {
         uart_send_nak(0, ERR_SIZE_TOO_LARGE);
-        return;
-    }
-
-    /* Erase the entire application region */
-    HAL_FLASH_Unlock();
-    bool ok = flash_erase_app_region();
-    HAL_FLASH_Lock();
-
-    if (!ok) {
-        uart_send_nak(0, ERR_FLASH_ERASE);
         return;
     }
 
@@ -376,7 +368,8 @@ static void process_ota_chunk(const ProtoFrame_t *f) {
     uint32_t addr = APP_BASE + (seq * FLASH_PAGE_SIZE);
     uint16_t data_len = f->len - 4; /* payload after seq */
 
-    if (data_len > FLASH_PAGE_SIZE) {
+    if (data_len == 0 || data_len > FLASH_PAGE_SIZE ||
+        g_ota.bytes_written + data_len > g_ota.image_size) {
         uart_send_nak(g_ota.expected_seq, ERR_SIZE_TOO_LARGE);
         return;
     }
@@ -425,6 +418,14 @@ static void process_ota_end(const ProtoFrame_t *f) {
     }
 
     g_state = ST_OTA_VERIFY;
+
+    if (g_ota.bytes_written != g_ota.image_size) {
+        uint32_t result_payload[2] = { OTA_RESULT_FAIL, g_ota.version };
+        uart_send_frame(CMD_OTA_RESULT, (const uint8_t *)result_payload,
+                        sizeof(result_payload));
+        g_state = ST_ERROR;
+        return;
+    }
 
     /* Compute CRC-32 over the written image */
     uint32_t computed_crc = compute_image_crc();
@@ -589,7 +590,7 @@ void bootloader_run(void) {
         uint32_t idle_start = elapsed_ms();
 
         while (g_state == ST_OTA_ACTIVE) {
-            const ProtoFrame_t *f = wait_for_frame(1000U); /* 1s between chunks */
+            const ProtoFrame_t *f = wait_for_frame(OTA_CHUNK_TIMEOUT_MS);
 
             if (f == NULL) {
                 /* 30s total inactivity timeout */
@@ -656,7 +657,7 @@ ota_active:
         if (g_state == ST_OTA_ACTIVE) {
             uint32_t idle_start = elapsed_ms();
             while (g_state == ST_OTA_ACTIVE) {
-                const ProtoFrame_t *f = wait_for_frame(1000U);
+                const ProtoFrame_t *f = wait_for_frame(OTA_CHUNK_TIMEOUT_MS);
                 if (f == NULL) {
                     if (elapsed_ms() - idle_start > 30000U) {
                         ota_config_mark_failed();
@@ -695,26 +696,6 @@ void SysTick_Handler(void) {
 }
 
 /*---------------------------------------------------------------------------
- * UART RX interrupt handler
- *---------------------------------------------------------------------------*/
-
-void USART1_IRQHandler(void) {
-    /* RXNE: byte received */
-    if (USART1->SR & USART_SR_RXNE) {
-        uint8_t byte = (uint8_t)(USART1->DR & 0xFF);
-
-        /* Feed parser directly in ISR — keeps it simple in the bootloader
-         * since there's no RTOS to defer to. Parser state is purely CPU-bound. */
-        proto_parser_feed(&g_parser, byte);
-    }
-
-    /* Overrun error: clear by reading DR + SR */
-    if (USART1->SR & USART_SR_ORE) {
-        (void)USART1->DR;
-    }
-}
-
-/*---------------------------------------------------------------------------
  * HAL UART MSP init callback (called by HAL_UART_Init)
  *---------------------------------------------------------------------------*/
 
@@ -744,10 +725,8 @@ void HAL_UART_MspInit(UART_HandleTypeDef *huart) {
  *---------------------------------------------------------------------------*/
 
 int main(void) {
+    ramfunc_init();
     system_init();
-
-    /* Configure system clock (generated by CubeMX in real project) */
-    /* SystemClock_Config(); */
 
     uart_init();
     proto_parser_init(&g_parser);

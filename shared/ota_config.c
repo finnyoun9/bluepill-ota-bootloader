@@ -25,7 +25,7 @@
  * Must run from RAM because the CPU stalls when fetching from flash
  * during a flash erase/program operation on single-bank F1 devices.
  */
-__attribute__((section(".ramfunc")))
+__attribute__((section(".ramfunc"), noinline))
 static uint32_t flash_erase_page(uint32_t page_addr) {
     FLASH_EraseInitTypeDef erase_init = {
         .TypeErase   = FLASH_TYPEERASE_PAGES,
@@ -43,7 +43,7 @@ static uint32_t flash_erase_page(uint32_t page_addr) {
 /**
  * @brief Program a halfword to flash. Runs from RAM.
  */
-__attribute__((section(".ramfunc")))
+__attribute__((section(".ramfunc"), noinline))
 static HAL_StatusTypeDef flash_program_halfword(uint32_t addr, uint16_t data) {
     return HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD, addr, data);
 }
