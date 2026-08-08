@@ -4,6 +4,8 @@
 
 基于 STM32F103C8T6 (Blue Pill) + FreeRTOS + ESP32 协处理器的**智能环境监测与联动控制系统**，支持蓝牙/WiFi OTA 固件升级，Web 实时仪表盘，MQTT 上云，以及传感器→决策→执行器闭环联动控制。
 
+> 想快速回顾每次提交到底改了什么，可看双语 [CHANGELOG.md](CHANGELOG.md)。它会区分“已经实机验证”和“仍是设计/待验证”的内容。
+
 ## 项目定位
 
 嵌入式 MCU / RTOS 方向简历项目。覆盖 ARM Cortex-M3 裸机 Bootloader、FreeRTOS 多任务实时系统、7 种外设协议、多传感器驱动、ESP32 双模无线网关、以及 Web/蓝牙/Python 多层控制接口。
