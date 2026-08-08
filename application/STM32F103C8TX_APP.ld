@@ -122,7 +122,8 @@ SECTIONS
         . = ALIGN(8);
         PROVIDE(end = .);
         PROVIDE(_end = .);
-        . = . + 8K;   /* FreeRTOS heap_4 uses this region */
+        . = . + 1K;   /* heap_4 owns the FreeRTOS heap (static array);
+                       * this region only serves libc _end/_sbrk */
         . = ALIGN(8);
         __heap_limit = .;
     } > RAM
