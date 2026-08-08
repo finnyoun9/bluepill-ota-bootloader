@@ -98,8 +98,8 @@
 ```
 STM32 Blue Pill          ESP32              传感器/执行器
 ─────────────────        ────────────        ────────────
-PA2 (TX)  ────────────► GPIO16 (RX)
-PA3 (RX)  ◄──────────── GPIO17 (TX)
+PA9 (TX)  ────────────► GPIO16 (RX)
+PA10 (RX) ◄──────────── GPIO17 (TX)
 GND       ─────────────── GND
 
 PB6/PB7  (I2C1 SCL/SDA) ─── AHT20 + BH1750 + SSD1306
@@ -129,18 +129,17 @@ pio run -d esp32-comm-bridge       # ESP32 桥 → esp32-comm-bridge/.pio/build/
 
 ### 烧录
 
-1. **Bootloader**: ST-Link 烧录 `pio run -e bluepill` 产物到 `0x08000000`
-2. **Application**: ST-Link 烧录 `pio run -e app` 产物到 `0x08002000`
-3. **ESP32**: `pio run -d esp32-comm-bridge -t upload`（或 esptool 烧 firmware.bin）
+1. **Bootloader**: ST-Link 执行 `pio run -e bluepill -t upload`，写入 `0x08000000`
+2. **Application**: ST-Link 执行 `pio run -e app -t upload`，写入 `0x08002000`
+3. **ESP32**: 手动进入下载模式后执行 `pio run -d esp32-comm-bridge -t upload --upload-port COM4`
 
 ### 测试
 
 ```bash
-# 查询 STM32 状态（Windows 串口用 COM 格式）
-python tools/ota_sender.py COM3 --status
+# Windows 蓝牙 SPP 出站端口（本机当前为 COM6）
+pio device monitor -p COM6 -b 115200
 
-# OTA 固件升级
-python tools/ota_sender.py COM3 fw_v2.bin --version 2
+# 在 monitor 中输入 STATUS 或 VERSION 并按 Enter
 
 # Web 仪表盘
 浏览器打开 http://<ESP32_IP>
@@ -200,7 +199,14 @@ bluepill-ota/
 - **蓝牙组件用 sdkconfig.defaults 开启**（`-D CONFIG_BT_*` 编译宏对 ESP-IDF 无效）
 - **共享协议跨平台**：`shared/protocol.c` 已 C/C++ 兼容；ESP32 端镜像为 `src/protocol.cpp` 编译
 - **国内网络编译 ESP32 需代理**：`$env:HTTPS_PROXY='http://127.0.0.1:7897'; pio run -d esp32-comm-bridge`
-- Application 补了 72MHz 时钟配置（HSE→PLL×9）、heap 8KB→12KB
+- Application 使用 8MHz HSE→PLL×8 的 64MHz 时钟；当前 STM32↔ESP32 链路统一为 9600 baud
+
+## 硬件链路验证（2026-08-09）
+
+- ESP32（CH340，COM4）和 STM32（ST-Link SWD）均已完成烧录并通过写后校验。
+- 物理 UART：`ESP32 GPIO17 → PA10`、`ESP32 GPIO16 ← PA9`、两板 GND 直连；使用 USART1，9600 baud。
+- Windows 已通过 Bluetooth Classic SPP 连接 `STM32-OTA-Bridge`；`STATUS` 正常，`VERSION` 返回 STM32 的 `FW Version: 0`。
+- 连续发送 10 次 `VERSION`，10/10 成功。此结论覆盖蓝牙→ESP32→UART→STM32 应用→回包，不等同于完整固件 OTA 已验证。
 
 ## 关键约束
 

@@ -20,12 +20,12 @@
 | PB11 | I2C2_SDA | 同上 | SDA | 地址: 0x76/0x68/0x29 |
 
 > 为什么分两条总线：(1) 6 个模块挂在一条总线上电容过大，400kHz 可能不稳；(2) 简历上两条 I2C 总线比一条更有说服力；(3) 慢速组 100kHz，快速组 400kHz，各取所需。两组地址无冲突。
-| **USART2（ESP32 通信，不可动）** |||||
-| PA2 | USART2_TX | ESP32 | GPIO16 (RX) | STM32→ESP32 |
-| PA3 | USART2_RX | ESP32 | GPIO17 (TX) | ESP32→STM32 |
-| **USART1（调试串口，可选）** |||||
-| PA9 | USART1_TX | USB-TTL 模块 | RX | 调试日志输出 |
-| PA10 | USART1_RX | USB-TTL 模块 | TX | 调试命令输入 |
+| **USART1（ESP32 通信，当前接线）** |||||
+| PA9 | USART1_TX | ESP32 | GPIO16 (RX) | STM32→ESP32 |
+| PA10 | USART1_RX | ESP32 | GPIO17 (TX) | ESP32→STM32 |
+| **SWD（程序烧录/调试）** |||||
+| PA13 | SWDIO | ST-Link | SWDIO | SWD 数据 |
+| PA14 | SWCLK | ST-Link | SWCLK | SWD 时钟 |
 | **1-Wire** |||||
 | PA0 | GPIO | DHT11 | DATA | 单总线，bit-banging |
 | **Timer 2 Encoder Mode** |||||

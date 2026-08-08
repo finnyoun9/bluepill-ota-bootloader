@@ -94,7 +94,10 @@ void proto_parser_init(ProtoParser_t *p) {
     p->state       = FRAME_STATE_SYNC;
     p->payload_idx = 0;
     p->rx_crc      = 0;
-    p->calc_crc    = 0xFFFFFFFFU;
+    /* Keep this in sync with proto_crc32_buf().  That helper exposes a
+     * finalized running CRC API: an initial value of 0xFFFFFFFF represents
+     * an unfinalized CRC accumulator of zero. */
+    p->calc_crc    = 0U;
     p->frame.cmd   = 0;
     p->frame.len   = 0;
 }
@@ -174,8 +177,9 @@ const ProtoFrame_t *proto_parser_feed(ProtoParser_t *p, uint8_t byte) {
          * must not be jumped over across case labels in C++). */
         p->rx_crc |= ((uint32_t)byte << 24);
 
-        /* Finalise calculated CRC */
-        uint32_t final_crc = p->calc_crc ^ 0xFFFFFFFFU;
+        /* proto_build_frame() writes the raw accumulator returned by
+         * proto_crc32_buf(), so compare the raw value here as well. */
+        uint32_t final_crc = p->calc_crc;
 
         p->state = FRAME_STATE_SYNC; /* ready for next frame */
 

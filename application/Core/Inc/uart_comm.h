@@ -26,7 +26,7 @@
  *---------------------------------------------------------------------------*/
 
 /**
- * @brief Initialise USART2 (PA2=TX, PA3=RX) at the configured baud rate.
+ * @brief Initialise USART1 (PA9=TX, PA10=RX) at the configured baud rate.
  *        Sets up interrupt-driven RX feeding into a stream buffer.
  */
 void uart_comm_init(uint32_t baud_rate);
@@ -37,12 +37,12 @@ void uart_comm_init(uint32_t baud_rate);
 StreamBufferHandle_t uart_comm_get_rx_stream(void);
 
 /**
- * @brief Send a raw byte over UART2 (blocking).
+ * @brief Send a raw byte over USART1 (blocking).
  */
 void uart_comm_send_byte(uint8_t byte);
 
 /**
- * @brief Send a buffer over UART2 (blocking).
+ * @brief Send a buffer over USART1 (blocking).
  */
 void uart_comm_send(const uint8_t *data, uint16_t len);
 
