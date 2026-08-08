@@ -32,9 +32,16 @@ extern "C" {
 #define PROTO_MAX_FRAME         (PROTO_HEADER_SIZE + PROTO_MAX_PAYLOAD + PROTO_CRC_SIZE)
 
 /* Flash layout (shared so bootloader and app agree) */
+/* #ifndef guards: STM32 HAL already defines FLASH_BASE/FLASH_PAGE_SIZE */
+#ifndef FLASH_BASE
 #define FLASH_BASE              0x08000000U
+#endif
+#ifndef FLASH_SIZE
 #define FLASH_SIZE              0x00010000U   /* 64KB */
+#endif
+#ifndef FLASH_PAGE_SIZE
 #define FLASH_PAGE_SIZE         1024U         /* 1KB per page on F103C8 */
+#endif
 
 #define BOOTLOADER_BASE         0x08000000U
 #define BOOTLOADER_SIZE         0x00002000U   /* 8KB, pages 0-7 */
@@ -148,7 +155,7 @@ typedef struct {
 
 /* Statically verify sizes */
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
-_Static_assert(sizeof(BootConfig_t) == 56, "BootConfig_t size mismatch");
+_Static_assert(sizeof(BootConfig_t) == 48, "BootConfig_t size mismatch");
 #endif
 
 #pragma pack(pop)

@@ -168,6 +168,20 @@ bluepill-ota/
 
 完整说明见 [docs/project-framework.md](docs/project-framework.md)
 
+## 本地验证记录（2026-08-07）
+
+- Bootloader 已通过 PlatformIO + `ststm32` 平台编译验证：RAM 11.0% (2252B)，Flash 8.8% (5756B)，`firmware.bin` 约 6KB（满足 bootloader 8KB 硬约束）
+- 修复：`shared/protocol.h` 中 `BootConfig_t` 大小断言 56 → 48（实际 12×uint32=48B）；`FLASH_BASE`/`FLASH_PAGE_SIZE` 加 `#ifndef` 保护避免与 STM32 HAL 重定义
+- PC 端工具：`python tools/ota_sender.py COM3 fw.bin --version 2`（Windows 串口用 COM 格式）
+- 注意：ESP32 端编译需 PlatformIO 能访问官方包镜像（国内网络建议配置镜像源）
+
+## 关键约束
+
+- STM32F103 单 Flash Bank → Flash 编程代码在 RAM 中执行 (`.ramfunc`)
+- Flash 页大小: 1KB → OTA 以 1KB 块传输
+- Bootloader 固定 8KB → 不能超出
+- Application 起始于 `0x08002000` → 必须设置 `SCB->VTOR`
+
 ## License
 
 MIT
