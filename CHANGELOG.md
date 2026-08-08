@@ -8,10 +8,22 @@
 
 - Bluetooth SPP → ESP32 → UART → STM32 application is hardware-verified. Ten consecutive `VERSION` requests succeeded during the 2026-08-08 bring-up.
 - 蓝牙 SPP → ESP32 → UART → STM32 应用链路已经实机验证；2026-08-08 连续发送 10 次 `VERSION` 均成功返回。
-- End-to-end OTA (stage firmware, reboot into bootloader, erase/program, CRC verification, then restart application) is **not yet verified**. The next change set focuses on that path.
-- 完整 OTA（暂存固件、切入 Bootloader、擦写、CRC 校验、重启应用）**尚未实测闭环**；下一阶段专门推进这条路径。
+- Revision `1898386` has been built for all three targets; its new STM32 bootloader and application were flashed and verified through ST-Link. The matching ESP32 bridge firmware still needs its physical download-mode flash, then a real OTA run.
+- `1898386` 已完成三目标构建；其中新版 STM32 Bootloader 与 Application 已通过 ST-Link 烧录和校验。还差 ESP32 进入下载模式后刷写对应 Bridge 固件，并跑一次真实 OTA。
+- End-to-end OTA (stage firmware, reboot into bootloader, erase/program, CRC verification, then restart application) remains **unverified until that hardware run completes**.
+- 完整 OTA（暂存固件、切入 Bootloader、擦写、CRC 校验、重启应用）在那次硬件验收完成前仍属于**未验证**状态。
 
 ## Milestones / 里程碑
+
+### v0.9 — Deterministic full-OTA pipeline / 可确定时序的完整 OTA 链路
+
+**Commit:** [`1898386`](https://github.com/finnyoun9/bluepill-ota-bootloader/commit/1898386f95054f242bc59570a229fa337a0dc316)
+
+- 中文：修掉了几处会让真实 OTA 必然失败的代码问题：应用先写 OTA 配置并回复 `CMD_OTA_READY`，ESP32 再等待 Bootloader；1 KB 数据块连同 4 字节序号的 1028 字节负载被正式支持；9600 baud 下 ACK 超时改为 2 秒；Bootloader 不再在 `OTA_BEGIN` 时多擦一遍整个 App 区。
+- English: Fixed several defects that would make real OTA fail: the application now persists the OTA request and replies with `CMD_OTA_READY` before the ESP32 waits for the bootloader; the protocol now accepts a 1028-byte OTA payload (4-byte sequence + 1 KB data); the 9600-baud ACK timeout is 2 s; and the bootloader no longer redundantly erases the entire app region at `OTA_BEGIN`.
+- 中文：把 CRC 统一为标准 IEEE CRC-32，强制 Flash 擦写函数保留在 `.ramfunc` 并在启动时复制到 RAM；新增 `tools/bridge_ota.py` 自动走 Bluetooth COM → SPIFFS → STM32 的流程，以及 C 协议烟测。
+- English: Standardized CRC handling on IEEE CRC-32, forced Flash-writing functions to remain in `.ramfunc` and copied them to RAM at startup, added `tools/bridge_ota.py` for Bluetooth COM → SPIFFS → STM32 transfer, and added a C protocol smoke test.
+- 验证 / Validation: 三个 PlatformIO 目标已构建成功、协议烟测通过、新 STM32 Bootloader/App 已由 ST-Link 写入并 Verify；ESP32 刷写和完整 OTA 实机闭环仍待进行。 / All three PlatformIO targets build, the protocol smoke test passes, and the new STM32 bootloader/app were ST-Link programmed and verified; ESP32 flashing and full OTA hardware closure are still pending.
 
 ### v0.1 — Initial OTA system skeleton / 初始 OTA 系统骨架
 
