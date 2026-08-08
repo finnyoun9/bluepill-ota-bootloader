@@ -9,11 +9,11 @@
  * Mark the HAL flash functions and wrappers with __attribute__((section(".ramfunc"))).
  */
 
+/* STM32 HAL first so FLASH_BASE/FLASH_PAGE_SIZE are defined before
+ * protocol.h's #ifndef guards are evaluated (include-order independent). */
+#include "stm32f1xx_hal.h"
 #include "ota_config.h"
 #include <string.h>
-
-/* STM32 HAL includes — adjust paths for your project structure */
-#include "stm32f1xx_hal.h"
 
 /*---------------------------------------------------------------------------
  * Internal helpers — placed in RAM (.ramfunc) for F1 single-bank safety
