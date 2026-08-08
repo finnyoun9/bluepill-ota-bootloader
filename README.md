@@ -143,6 +143,10 @@ pio device monitor -p COM6 -b 115200
 
 # 在 monitor 中输入 STATUS 或 VERSION 并按 Enter
 
+# 端到端蓝牙 OTA（先刷写本次 Bootloader、Application 和 ESP32 固件）
+C:\Users\yyfxy\AppData\Local\Programs\Python\Python311\python.exe `
+  tools\bridge_ota.py COM6 .pio\build\app\firmware.bin --version 1
+
 # Web 仪表盘
 浏览器打开 http://<ESP32_IP>
 ```
@@ -156,12 +160,14 @@ pio device monitor -p COM6 -b 115200
 | `STATUS` | 桥状态：BT/WiFi 连接、固件暂存情况 |
 | `VERSION` | 查询 STM32 当前固件版本 |
 | `OTA <url>` | 从 URL 下载固件并触发 OTA（版本从文件名 `fw_v<N>.bin` 解析） |
-| `FW <ver>,<crc32>` | 开始蓝牙推送固件（重置接收状态，记录版本+CRC） |
-| `SEND` | 把已暂存固件传输到 STM32（蓝牙推送完成后执行） |
+| `FW <ver>,<size>,<crc32>` | 开始蓝牙推送固件；声明精确长度、版本和标准 CRC-32 |
+| `SEND` | 在桥返回 `FW: staged` 后，把已校验的暂存固件传输到 STM32 |
 | `WIFI <ssid>,<pass>` | 配置 WiFi 并重连（存 NVS，重启后仍生效） |
 | `RESET` | 软件复位 ESP32 |
 
 > 传感器查询/控制类命令（TEMP/RELAY1/SERVO/AUTO 等）属于 docs 规划的 Phase 扩展，当前固件未实现。
+
+> `tools/bridge_ota.py` 会自动计算 `<size>` 和 CRC、等待 ESP32 暂存完成，再发送 `SEND`。不要在普通串口终端里手工粘贴二进制 `.bin`。
 
 ## 目录结构
 

@@ -85,16 +85,17 @@ pio run -d esp32-comm-bridge
 
 ## 蓝牙协议（实现现状）
 
-服务名 `STM32-OTA-Bridge`。命令：`STATUS` / `VERSION` / `OTA <url>` / `FW <ver>,<crc32>` / `SEND` / `WIFI <ssid>,<pass>` / `RESET`。
+服务名 `STM32-OTA-Bridge`。命令：`STATUS` / `VERSION` / `OTA <url>` / `FW <ver>,<size>,<crc32>` / `SEND` / `WIFI <ssid>,<pass>` / `RESET`。
 
 蓝牙推固件的正确流程（`FW` + 二进制 + `SEND`）：
-1. 手机发 `FW <version>,<crc32hex>` —— 记录版本/CRC，重置接收
-2. 发二进制固件数据（SPP 逐块推）
-3. 发 `SEND` —— 触发 `transfer_to_stm32()` 走完整 OTA 流程
+1. PC 发 `FW <version>,<size>,<crc32hex>` —— 声明精确大小、版本和标准 IEEE CRC-32，ESP32 清空旧暂存区
+2. 发恰好 `<size>` 字节的二进制固件数据（SPP 逐块推）
+3. 等 ESP32 返回 `FW: staged ...`；这说明文件长度完整，随后发 `SEND`
+4. ESP32 复算 SPIFFS 文件 CRC，向应用发 `CMD_OTA_AVAILABLE`，等待应用以 `CMD_OTA_READY` 确认配置页已写好，再开始 Bootloader OTA
 
 > 注意：SPP 回调里必须显式携带字节长度，固件 bin 含 NUL 字节，`strlen` 会截断。
 
-> 当前已实测文本命令的 `STATUS` / `VERSION`。蓝牙二进制暂存、应用切入 bootloader、分块写入和镜像 CRC 必须作为一次独立的端到端 OTA 验收执行。
+> 当前已实测文本命令的 `STATUS` / `VERSION`。完整 OTA 已具备可执行脚本 `tools/bridge_ota.py`，仍需在刷写本轮三端固件后做一次实机验收。
 
 ## 下一步
 

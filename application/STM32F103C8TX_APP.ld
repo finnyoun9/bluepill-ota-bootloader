@@ -116,6 +116,19 @@ SECTIONS
         __bss_end__ = _ebss;
     } > RAM
 
+    /* Flash-writing wrappers are copied to RAM by ramfunc_init() in main. */
+    .ramfunc :
+    {
+        . = ALIGN(4);
+        _sramfunc = .;
+        *(.ramfunc)
+        *(.ramfunc*)
+        . = ALIGN(4);
+        _eramfunc = .;
+    } > RAM AT > FLASH
+
+    _siramfunc = LOADADDR(.ramfunc);
+
     /* ---- Heap for FreeRTOS ---- */
     ._user_heap_stack :
     {

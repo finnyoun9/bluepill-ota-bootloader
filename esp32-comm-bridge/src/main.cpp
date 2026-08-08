@@ -12,7 +12,7 @@
  *
  * Text commands over BT SPP:
  *   OTA <url>          Download firmware from URL, then transfer to STM32
- *   FW <ver>,<crc32>   Begin a Bluetooth firmware push (reset receive state)
+ *   FW <ver>,<size>,<crc32>  Begin a length-prefixed Bluetooth firmware push
  *   SEND               Transfer the staged firmware to STM32
  *   WIFI <ssid>,<pass> Configure WiFi credentials (NVS) and reconnect
  *   VERSION            Query STM32 firmware version
@@ -72,12 +72,10 @@ static const char *TAG = "bridge";
 
 /* BT SPP */
 #define SPP_SERVER_NAME         "STM32-OTA-Bridge"
-#define SPP_TASK_STACK          4096
+#define SPP_TASK_STACK          8192
 #define SPP_TASK_PRIO           5
 
 /* OTA transfer */
-#define OTA_TASK_STACK          4096
-#define OTA_TASK_PRIO           4
 #define OTA_CHUNK_SIZE          1024
 
 /* SPIFFS firmware storage */
@@ -110,7 +108,9 @@ typedef struct {
     size_t   len;
 } SppData_t;
 static bool            g_fw_staged = false;
+static bool            g_fw_receiving = false;
 static uint32_t        g_fw_size = 0;
+static uint32_t        g_fw_expected_size = 0;
 static uint32_t        g_fw_version = 0;
 static uint32_t        g_fw_crc32 = 0;
 
@@ -128,8 +128,11 @@ static void bt_spp_init(void);
 static void wifi_init_sta(void);
 static void wifi_connect(const char *ssid, const char *password);
 static void bt_recv_task(void *pv);
+static void bt_spp_print(const char *msg);
 static bool download_firmware_http(const char *url);
 static bool transfer_to_stm32(void);
+static bool stage_firmware_data(const uint8_t *data, size_t len);
+static bool verify_staged_firmware(void);
 
 /*---------------------------------------------------------------------------
  * UART to STM32
@@ -157,12 +160,22 @@ static void uart_stm32_init(void) {
 /**
  * @brief Send a protocol frame to STM32 over UART.
  */
-static void stm32_send_frame(uint8_t cmd, const uint8_t *payload, uint16_t len) {
+static bool stm32_send_frame(uint8_t cmd, const uint8_t *payload, uint16_t len) {
     uint8_t buf[PROTO_MAX_FRAME];
     uint16_t total = proto_build_frame(buf, sizeof(buf), cmd, payload, len);
-    if (total > 0) {
-        uart_write_bytes(UART_STM32_NUM, buf, total);
+    if (total == 0) {
+        ESP_LOGE(TAG, "Could not build UART frame cmd=0x%02X len=%u", cmd, len);
+        return false;
     }
+
+    int written = uart_write_bytes(UART_STM32_NUM, buf, total);
+    if (written != total) {
+        ESP_LOGE(TAG, "UART write short: cmd=0x%02X expected=%u got=%d",
+                 cmd, total, written);
+        return false;
+    }
+
+    return uart_wait_tx_done(UART_STM32_NUM, pdMS_TO_TICKS(3000)) == ESP_OK;
 }
 
 /**
@@ -219,6 +232,100 @@ static void spiffs_init(void) {
 }
 
 /*---------------------------------------------------------------------------
+ * Firmware staging integrity
+ *---------------------------------------------------------------------------*/
+
+static void discard_incoming_firmware(void) {
+    g_fw_staged = false;
+    g_fw_receiving = false;
+    g_fw_size = 0;
+    g_fw_expected_size = 0;
+    unlink(FW_FILE_PATH);
+}
+
+static bool stage_firmware_data(const uint8_t *data, size_t len) {
+    if (!g_fw_receiving || g_fw_expected_size == 0 ||
+        g_fw_size > g_fw_expected_size ||
+        len > (size_t)(g_fw_expected_size - g_fw_size)) {
+        ESP_LOGE(TAG, "Invalid firmware chunk: received=%u staged=%lu expected=%lu",
+                 (unsigned)len, g_fw_size, g_fw_expected_size);
+        discard_incoming_firmware();
+        return false;
+    }
+
+    FILE *f = fopen(FW_FILE_PATH, "ab");
+    if (!f) {
+        ESP_LOGE(TAG, "Cannot open staged firmware for append");
+        discard_incoming_firmware();
+        return false;
+    }
+
+    size_t written = fwrite(data, 1, len, f);
+    fclose(f);
+    if (written != len) {
+        ESP_LOGE(TAG, "SPIFFS write short: expected=%u got=%u",
+                 (unsigned)len, (unsigned)written);
+        discard_incoming_firmware();
+        return false;
+    }
+
+    g_fw_size += (uint32_t)len;
+    if (g_fw_size == g_fw_expected_size) {
+        g_fw_receiving = false;
+        g_fw_staged = true;
+
+        char msg[96];
+        snprintf(msg, sizeof(msg), "FW: staged %lu bytes; send SEND to start OTA\r\n",
+                 g_fw_size);
+        bt_spp_print(msg);
+    }
+    return true;
+}
+
+static bool verify_staged_firmware(void) {
+    if (!g_fw_staged || g_fw_receiving || g_fw_size == 0 ||
+        g_fw_size != g_fw_expected_size) {
+        ESP_LOGE(TAG, "Firmware stage is incomplete");
+        return false;
+    }
+
+    struct stat st;
+    if (stat(FW_FILE_PATH, &st) != 0 || st.st_size < 0 ||
+        (uint32_t)st.st_size != g_fw_size) {
+        ESP_LOGE(TAG, "Firmware file size mismatch");
+        return false;
+    }
+
+    FILE *f = fopen(FW_FILE_PATH, "rb");
+    if (!f) {
+        ESP_LOGE(TAG, "Cannot open staged firmware for verification");
+        return false;
+    }
+
+    uint8_t buffer[256];
+    uint32_t crc = 0U;
+    uint32_t total = 0U;
+    while (true) {
+        size_t count = fread(buffer, 1, sizeof(buffer), f);
+        if (count == 0) {
+            break;
+        }
+        total += (uint32_t)count;
+        crc = proto_crc32(buffer, count, crc);
+    }
+    bool read_ok = !ferror(f);
+    fclose(f);
+
+    if (!read_ok || total != g_fw_size || crc != g_fw_crc32) {
+        ESP_LOGE(TAG, "Firmware verification failed: size=%lu/%lu crc=0x%08lX/0x%08lX",
+                 total, g_fw_size, crc, g_fw_crc32);
+        return false;
+    }
+
+    return true;
+}
+
+/*---------------------------------------------------------------------------
  * Bluetooth SPP
  *---------------------------------------------------------------------------*/
 
@@ -250,6 +357,14 @@ static void spp_callback(esp_spp_cb_event_t event, esp_spp_cb_param_t *param) {
     case ESP_SPP_CLOSE_EVT:
         ESP_LOGI(TAG, "SPP closed, handle=%u", param->close.handle);
         g_spp_handle = 0;
+        g_cmd_len = 0;
+        if (g_fw_receiving) {
+            ESP_LOGW(TAG, "Discarding incomplete firmware after SPP disconnect");
+            g_fw_staged = false;
+            g_fw_receiving = false;
+            g_fw_size = 0;
+            g_fw_expected_size = 0;
+        }
         break;
 
     case ESP_SPP_DATA_IND_EVT:
@@ -262,7 +377,11 @@ static void spp_callback(esp_spp_cb_event_t event, esp_spp_cb_param_t *param) {
                 memcpy(copy, param->data_ind.data, param->data_ind.len);
                 copy[param->data_ind.len] = '\0';
                 SppData_t item = { .data = copy, .len = param->data_ind.len };
-                xQueueSend(g_spp_queue, &item, 0);
+                if (xQueueSend(g_spp_queue, &item, 0) != pdPASS) {
+                    ESP_LOGW(TAG, "SPP RX queue full; dropping %u bytes",
+                             (unsigned)item.len);
+                    free(copy);
+                }
             }
         }
         break;
@@ -273,7 +392,7 @@ static void spp_callback(esp_spp_cb_event_t event, esp_spp_cb_param_t *param) {
 }
 
 static void bt_spp_init(void) {
-    g_spp_queue = xQueueCreate(32, sizeof(SppData_t));
+    g_spp_queue = xQueueCreate(64, sizeof(SppData_t));
 
     /* sdkconfig selects Classic-only SPP, so BLE RAM is not needed. */
     ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_BLE));
@@ -320,6 +439,16 @@ static void bt_recv_task(void *pv) {
             uint8_t *data = item.data;
             size_t   len  = item.len;
 
+            /* FW declares an exact byte count. Until that count is reached,
+             * every byte is firmware — even if a chunk happens to start with
+             * an ASCII letter. The sender waits for the staged confirmation
+             * before it sends the subsequent SEND command. */
+            if (g_fw_receiving) {
+                stage_firmware_data(data, len);
+                free(data);
+                continue;
+            }
+
             /* Reassemble a terminal command. SPP does not preserve the
              * write boundaries of the PC serial terminal. */
             if (g_cmd_len > 0 ||
@@ -359,7 +488,8 @@ static void bt_recv_task(void *pv) {
             }
 
             /* Simple text command detection: starts with ASCII letter */
-            if (len > 0 && data[0] >= 'A' && data[0] <= 'Z') {
+            if (len > 0 && ((data[0] >= 'A' && data[0] <= 'Z') ||
+                            (data[0] >= 'a' && data[0] <= 'z'))) {
                 char cmd[256] = {0};
                 size_t n = len < sizeof(cmd) - 1 ? len : sizeof(cmd) - 1;
                 memcpy(cmd, data, n);
@@ -386,19 +516,24 @@ static void bt_recv_task(void *pv) {
                     }
 
                 } else if (strncmp(cmd, "FW ", 3) == 0 || strncmp(cmd, "fw ", 3) == 0) {
-                    /* Begin a Bluetooth firmware push: FW <version>,<crc32 hex>
-                     * Resets receive state; sender then streams binary chunks
-                     * (which the else-branch appends) and finally issues SEND. */
-                    unsigned long ver = 0, crc = 0;
-                    if (sscanf(cmd + 3, "%lu,%lx", &ver, &crc) == 2) {
+                    /* Begin a Bluetooth firmware push. The declared length
+                     * makes the following binary stream unambiguous. */
+                    unsigned long ver = 0, size = 0, crc = 0;
+                    if (sscanf(cmd + 3, "%lu,%lu,%lx", &ver, &size, &crc) == 3 &&
+                        size > 0 && size <= FW_FILE_MAX_SIZE) {
+                        discard_incoming_firmware();
                         g_fw_version = (uint32_t)ver;
+                        g_fw_expected_size = (uint32_t)size;
                         g_fw_crc32   = (uint32_t)crc;
-                        g_fw_staged  = false;
-                        g_fw_size    = 0;
-                        unlink(FW_FILE_PATH);   /* start fresh */
-                        bt_spp_print("FW: ready, send binary data then SEND\r\n");
+                        g_fw_receiving = true;
+
+                        char msg[96];
+                        snprintf(msg, sizeof(msg),
+                                 "FW: ready for %lu bytes, send binary data\r\n",
+                                 g_fw_expected_size);
+                        bt_spp_print(msg);
                     } else {
-                        bt_spp_print("FW: usage FW <version>,<crc32-hex>\r\n");
+                        bt_spp_print("FW: usage FW <version>,<size>,<crc32-hex>; max 55296 bytes\r\n");
                     }
 
                 } else if (strncmp(cmd, "SEND", 4) == 0 || strncmp(cmd, "send", 4) == 0) {
@@ -411,7 +546,7 @@ static void bt_recv_task(void *pv) {
                             bt_spp_print("STATUS: Transfer failed\r\n");
                         }
                     } else {
-                        bt_spp_print("STATUS: No firmware staged (use FW <ver>,<crc> then binary)\r\n");
+                        bt_spp_print("STATUS: No verified firmware staged (use FW <ver>,<size>,<crc> then binary)\r\n");
                     }
 
                 } else if (strncmp(cmd, "WIFI ", 5) == 0 || strncmp(cmd, "wifi ", 5) == 0) {
@@ -434,9 +569,9 @@ static void bt_recv_task(void *pv) {
 
                 } else if (strncmp(cmd, "VERSION", 7) == 0 || strncmp(cmd, "version", 7) == 0) {
                     /* Query STM32 version */
-                    stm32_send_frame(CMD_GET_STATUS, NULL, 0);
                     ProtoFrame_t resp;
-                    if (stm32_wait_cmd(CMD_STATUS_RSP, &resp, 1000)) {
+                    if (stm32_send_frame(CMD_GET_STATUS, NULL, 0) &&
+                        stm32_wait_cmd(CMD_STATUS_RSP, &resp, 1500)) {
                         char buf[64];
                         uint32_t ver = 0;
                         if (resp.len >= 4) memcpy(&ver, resp.payload, 4);
@@ -449,18 +584,21 @@ static void bt_recv_task(void *pv) {
                 } else if (strncmp(cmd, "STATUS", 6) == 0 || strncmp(cmd, "status", 6) == 0) {
                     wifi_ap_record_t ap_info;
                     bool wifi_connected = (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK);
-                    char buf[160];
+                    char buf[192];
                     snprintf(buf, sizeof(buf),
                              "Bridge Status:\r\n"
                              "  BT connected: %s\r\n"
                              "  WiFi connected: %s\r\n"
+                             "  FW receiving: %s\r\n"
                              "  FW staged: %s\r\n"
-                             "  Staged size: %lu bytes\r\n"
+                             "  Staged size: %lu / %lu bytes\r\n"
                              "  Staged version: %lu\r\n",
                              g_spp_handle ? "yes" : "no",
                              wifi_connected ? "yes" : "no",
+                             g_fw_receiving ? "yes" : "no",
                              g_fw_staged ? "yes" : "no",
                              g_fw_size,
+                             g_fw_expected_size,
                              g_fw_version);
                     bt_spp_print(buf);
 
@@ -470,25 +608,10 @@ static void bt_recv_task(void *pv) {
                     esp_restart();
 
                 } else {
-                    bt_spp_print("Unknown command. Commands: OTA <url>, FW <ver>,<crc>, SEND, WIFI <ssid>,<pass>, VERSION, STATUS, RESET\r\n");
+                    bt_spp_print("Unknown command. Commands: OTA <url>, FW <ver>,<size>,<crc>, SEND, WIFI <ssid>,<pass>, VERSION, STATUS, RESET\r\n");
                 }
             } else {
-                /* Binary data — firmware file being pushed over SPP.
-                 * Append to /spiffs/fw.bin. Assumes FW <ver>,<crc> was
-                 * issued first. Uses item.len, not strlen: firmware images
-                 * contain NUL bytes. */
-                FILE *f = fopen(FW_FILE_PATH, "ab");
-                if (f) {
-                    fwrite(data, 1, len, f);
-                    fclose(f);
-                    g_fw_staged = true;
-
-                    /* Get file size */
-                    struct stat st;
-                    if (stat(FW_FILE_PATH, &st) == 0) {
-                        g_fw_size = st.st_size;
-                    }
-                }
+                bt_spp_print("FW: binary data rejected; start with FW <ver>,<size>,<crc>\r\n");
             }
 
             free(data);
@@ -555,6 +678,11 @@ static uint32_t parse_version_from_url(const char *url) {
 static bool download_firmware_http(const char *url) {
     ESP_LOGI(TAG, "Downloading firmware from: %s", url);
 
+    g_fw_staged = false;
+    g_fw_receiving = false;
+    g_fw_size = 0;
+    g_fw_expected_size = 0;
+
     FILE *f = fopen(FW_FILE_PATH, "wb");
     if (!f) {
         ESP_LOGE(TAG, "Cannot open firmware file for writing");
@@ -584,8 +712,6 @@ static bool download_firmware_http(const char *url) {
         return false;
     }
 
-    g_fw_size = content_length;
-
     uint8_t buf[HTTP_DOWNLOAD_BUF_SIZE];
     int total_read = 0;
 
@@ -598,7 +724,13 @@ static bool download_firmware_http(const char *url) {
             return false;
         }
 
-        fwrite(buf, 1, read_len, f);
+        if (fwrite(buf, 1, read_len, f) != (size_t)read_len) {
+            ESP_LOGE(TAG, "HTTP staging write failed at %d / %d",
+                     total_read, content_length);
+            esp_http_client_cleanup(client);
+            fclose(f);
+            return false;
+        }
         total_read += read_len;
 
         ESP_LOGI(TAG, "Downloaded %d / %d bytes", total_read, content_length);
@@ -607,18 +739,21 @@ static bool download_firmware_http(const char *url) {
     fclose(f);
     esp_http_client_cleanup(client);
 
+    g_fw_size = (uint32_t)total_read;
+    g_fw_expected_size = g_fw_size;
+
     /* Compute CRC-32 of downloaded file */
     f = fopen(FW_FILE_PATH, "rb");
     if (!f) return false;
 
-    uint32_t crc = 0xFFFFFFFFU;
+    uint32_t crc = 0U;
     while (true) {
         size_t n = fread(buf, 1, sizeof(buf), f);
         if (n == 0) break;
         crc = proto_crc32(buf, n, crc);
     }
     fclose(f);
-    g_fw_crc32 = crc ^ 0xFFFFFFFFU;
+    g_fw_crc32 = crc;
 
     /* Derive version from the URL filename (fw_v<N>.bin); default 1. */
     g_fw_version = parse_version_from_url(url);
@@ -635,8 +770,12 @@ static bool download_firmware_http(const char *url) {
  *---------------------------------------------------------------------------*/
 
 static bool transfer_to_stm32(void) {
-    if (!g_fw_staged) {
+    if (!g_fw_staged || g_fw_receiving) {
         ESP_LOGE(TAG, "No firmware staged for transfer");
+        return false;
+    }
+
+    if (!verify_staged_firmware()) {
         return false;
     }
 
@@ -649,27 +788,70 @@ static bool transfer_to_stm32(void) {
     ESP_LOGI(TAG, "Starting OTA transfer: size=%lu, CRC32=0x%08lX",
              g_fw_size, g_fw_crc32);
 
-    /* Step 1: Send OTA_BEGIN */
+    /* Step 1: ask the running application to persist its OTA request and
+     * reboot. CMD_OTA_READY makes the timing deterministic instead of relying
+     * on a guessed reset delay. */
+    uart_flush_input(UART_STM32_NUM);
+    if (!stm32_send_frame(CMD_OTA_AVAILABLE,
+                          (const uint8_t *)&g_fw_version, 4)) {
+        fclose(f);
+        return false;
+    }
+
+    ProtoFrame_t resp;
+    if (!stm32_wait_cmd(CMD_OTA_READY, &resp, 2000) || resp.len < 4) {
+        ESP_LOGE(TAG, "Application did not confirm OTA readiness");
+        fclose(f);
+        return false;
+    }
+
+    uint32_t ready_version = 0;
+    memcpy(&ready_version, resp.payload, 4);
+    if (ready_version != g_fw_version) {
+        ESP_LOGE(TAG, "OTA readiness version mismatch: %lu != %lu",
+                 ready_version, g_fw_version);
+        fclose(f);
+        return false;
+    }
+
+    /* The app sends READY, waits 50 ms, then resets. Give the bootloader time
+     * to configure HSE/USART1; it will keep a 2 s OTA window open. */
+    vTaskDelay(pdMS_TO_TICKS(150));
+    uart_flush_input(UART_STM32_NUM);
+
+    /* Step 2: start the bootloader transfer. */
     uint8_t begin_payload[12];
     memcpy(begin_payload,      &g_fw_size,   4);
     memcpy(begin_payload + 4,  &g_fw_version, 4);
     memcpy(begin_payload + 8,  &g_fw_crc32,  4);
-    stm32_send_frame(CMD_OTA_BEGIN, begin_payload, 12);
+    if (!stm32_send_frame(CMD_OTA_BEGIN, begin_payload, 12)) {
+        fclose(f);
+        return false;
+    }
 
     /* Wait for OTA_BEGIN_ACK */
-    ProtoFrame_t resp;
-    if (!stm32_wait_cmd(CMD_OTA_BEGIN_ACK, &resp, 2000)) {
+    if (!stm32_wait_cmd(CMD_OTA_BEGIN_ACK, &resp, 3000)) {
         ESP_LOGE(TAG, "No OTA_BEGIN_ACK from STM32");
         fclose(f);
         return false;
     }
 
-    uint32_t expected_seq = 0;
-    if (resp.len >= 4) {
-        memcpy(&expected_seq, resp.payload, 4);
+    if (resp.len < 4) {
+        ESP_LOGE(TAG, "Malformed OTA_BEGIN_ACK from STM32");
+        fclose(f);
+        return false;
     }
 
-    /* Step 2: Send chunks */
+    uint32_t expected_seq = 0;
+    memcpy(&expected_seq, resp.payload, 4);
+    if (expected_seq != 0) {
+        ESP_LOGE(TAG, "Bootloader expected unexpected first sequence: %lu",
+                 expected_seq);
+        fclose(f);
+        return false;
+    }
+
+    /* Step 3: Send chunks */
     uint8_t chunk_payload[PROTO_MAX_PAYLOAD];
     uint32_t seq = 0;
     uint32_t bytes_sent = 0;
@@ -684,7 +866,7 @@ static bool transfer_to_stm32(void) {
                            : OTA_CHUNK_SIZE;
 
         size_t n = fread(chunk_payload + 4, 1, chunk_len, f);
-        if (n == 0 && chunk_len > 0) {
+        if (n != chunk_len) {
             ESP_LOGE(TAG, "File read error at seq=%lu", seq);
             fclose(f);
             return false;
@@ -693,10 +875,15 @@ static bool transfer_to_stm32(void) {
         /* Send chunk with retry */
         bool acked = false;
         for (int retry = 0; retry < OTA_MAX_RETRIES && !acked; retry++) {
-            stm32_send_frame(CMD_OTA_CHUNK, chunk_payload, 4 + n);
+            if (!stm32_send_frame(CMD_OTA_CHUNK, chunk_payload, 4 + n)) {
+                ESP_LOGW(TAG, "Chunk %lu: UART write failed, retry %d",
+                         seq, retry + 1);
+                continue;
+            }
 
             ProtoFrame_t ack_resp;
-            if (stm32_wait_cmd(CMD_CHUNK_ACK, &ack_resp, OTA_CHUNK_TIMEOUT_MS)) {
+            if (stm32_wait_cmd(CMD_CHUNK_ACK, &ack_resp, OTA_CHUNK_TIMEOUT_MS) &&
+                ack_resp.len >= 4) {
                 uint32_t ack_seq;
                 memcpy(&ack_seq, ack_resp.payload, 4);
                 if (ack_seq == seq) {
@@ -710,7 +897,7 @@ static bool transfer_to_stm32(void) {
 
         if (!acked) {
             ESP_LOGE(TAG, "Chunk %lu failed after %d retries", seq, OTA_MAX_RETRIES);
-            stm32_send_frame(CMD_OTA_ABORT, NULL, 0);
+            (void)stm32_send_frame(CMD_OTA_ABORT, NULL, 0);
             fclose(f);
             return false;
         }
@@ -724,8 +911,10 @@ static bool transfer_to_stm32(void) {
     }
     fclose(f);
 
-    /* Step 3: Send OTA_END and verify */
-    stm32_send_frame(CMD_OTA_END, NULL, 0);
+    /* Step 4: Send OTA_END and verify */
+    if (!stm32_send_frame(CMD_OTA_END, NULL, 0)) {
+        return false;
+    }
 
     if (!stm32_wait_cmd(CMD_OTA_RESULT, &resp, 10000)) {
         ESP_LOGE(TAG, "No OTA_RESULT from STM32");
@@ -738,6 +927,9 @@ static bool transfer_to_stm32(void) {
     if (result_code == OTA_RESULT_OK) {
         ESP_LOGI(TAG, "OTA transfer successful!");
         g_fw_staged = false;
+        g_fw_size = 0;
+        g_fw_expected_size = 0;
+        g_fw_crc32 = 0;
         /* Delete the staged file */
         unlink(FW_FILE_PATH);
         return true;

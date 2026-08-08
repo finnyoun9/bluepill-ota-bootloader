@@ -60,11 +60,11 @@
 
 1. **Firmware staging** — ESP32 downloads firmware via WiFi or receives via Bluetooth, stores in SPIFFS
 2. **Trigger** — ESP32 sends `CMD_OTA_AVAILABLE` to STM32 application
-3. **Reboot** — STM32 app writes `BOOT_MODE_OTA` to config, calls `NVIC_SystemReset()`
-4. **Bootloader entry** — Bootloader reads config, sees OTA request
+3. **Ready** — STM32 app writes `BOOT_MODE_OTA` to config, returns `CMD_OTA_READY`
+4. **Reboot** — Application calls `NVIC_SystemReset()`; bootloader detects the flag and opens a 2 s OTA window
 5. **Handshake** — ESP32 sends `CMD_OTA_BEGIN` with firmware metadata
 6. **Transfer** — ESP32 sends 1KB chunks via `CMD_OTA_CHUNK`, bootloader erases+programs flash
-7. **Verify** — ESP32 sends `CMD_OTA_END`, bootloader computes CRC-32 over full image
+7. **Verify** — ESP32 sends `CMD_OTA_END`, bootloader computes standard CRC-32 over full image
 8. **Commit** — CRC match: write config, jump to new application
 
 > 硬件 bring-up 已验证 Bluetooth SPP 到 STM32 应用的 `VERSION` 往返（10/10）。完整固件传输、CRC 校验和回跳仍需单独验收。
@@ -83,7 +83,7 @@ STM32F103 has a single flash bank — code executing from flash stalls during er
 - 200ms passive UART window on every boot
 
 ### 4. Protocol Design
-Simple length-prefixed frames with CRC-32. Chunks are exactly 1KB (one flash page) for direct mapping: `addr = APP_BASE + seq * 1024`.
+Simple length-prefixed frames with standard IEEE CRC-32. Chunk data is at most 1KB (one flash page) for direct mapping: `addr = APP_BASE + seq * 1024`; an OTA chunk payload is 1028 bytes because it also carries a 4-byte sequence number.
 
 ## FreeRTOS Task Architecture
 

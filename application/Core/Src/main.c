@@ -44,6 +44,13 @@ static QueueHandle_t        g_data_queue;      /* Raw bytes: comm → app */
 static EventGroupHandle_t   g_event_group;
 static StreamBufferHandle_t g_rx_stream;
 
+/* The CMSIS startup file copies .data only. ota_config.c places the short
+ * Flash erase/program wrappers in .ramfunc, so initialize that section before
+ * the control task can write the OTA configuration page. */
+extern uint8_t _siramfunc;
+extern uint8_t _sramfunc;
+extern uint8_t _eramfunc;
+
 /* Event group bits */
 #define EVENT_OTA_AVAILABLE  (1 << 0)
 #define EVENT_CONNECTED      (1 << 1)
@@ -78,6 +85,15 @@ static void SystemClock_Config(void) {
     clk.APB2CLKDivider = RCC_HCLK_DIV1;   /* PCLK2 = 64MHz */
     if (HAL_RCC_ClockConfig(&clk, FLASH_LATENCY_2) != HAL_OK) {
         while (1);
+    }
+}
+
+static void ramfunc_init(void) {
+    const uint8_t *src = &_siramfunc;
+    uint8_t *dst = &_sramfunc;
+
+    while (dst < &_eramfunc) {
+        *dst++ = *src++;
     }
 }
 
@@ -156,7 +172,11 @@ static void vControlTask(void *pvParameters) {
             if (xQueueReceive(g_cmd_queue, &pending_version, 0) == pdPASS) {
                 /* Write OTA request to config then reboot into bootloader */
                 if (ota_config_request_update(pending_version, 0)) {
-                    /* Small delay so any pending UART TX completes */
+                    /* Confirm only after the config page is valid. The ESP32
+                     * waits for this before it begins the bootloader transfer. */
+                    cmd_handler_send_frame(CMD_OTA_READY,
+                                           (const uint8_t *)&pending_version, 4);
+                    /* Small delay so the confirmation fully leaves USART1. */
                     vTaskDelay(pdMS_TO_TICKS(50));
                     NVIC_SystemReset();
                 }
@@ -315,7 +335,7 @@ void cmd_handler_send_frame(uint8_t cmd, const uint8_t *payload, uint16_t len) {
     uint8_t buf[PROTO_MAX_FRAME];
     uint16_t total = proto_build_frame(buf, sizeof(buf), cmd, payload, len);
     if (total > 0) {
-        /* Send over UART in task context (send is blocking but fast at 115200) */
+        /* Send over UART in task context (blocking, but small at 9600 baud). */
         uart_comm_send(buf, total);
     }
 }
@@ -325,6 +345,8 @@ void cmd_handler_send_frame(uint8_t cmd, const uint8_t *payload, uint16_t len) {
  *---------------------------------------------------------------------------*/
 
 int main(void) {
+    ramfunc_init();
+
     /* VTOR already set in system_init, but set it here too defensively */
     SCB->VTOR = APP_BASE;
 

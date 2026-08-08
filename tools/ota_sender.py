@@ -2,7 +2,7 @@
 """
 OTA Firmware Sender — PC-side tool for testing STM32 bootloader.
 
-Connects to the STM32 Blue Pill via USB-TTL serial adapter (USART2)
+Connects to the STM32 Blue Pill via USB-TTL serial adapter (USART1 PA9/PA10)
 and sends a firmware .bin file using the bootloader protocol.
 
 Usage:
@@ -36,7 +36,8 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 PROTO_SYNC      = 0xA5
-PROTO_MAX_FRAME = 1032
+PROTO_MAX_PAYLOAD = 1028  # OTA chunk: sequence (4) + page data (1024)
+PROTO_MAX_FRAME = 1036
 FLASH_PAGE_SIZE = 1024
 
 # Commands — master to slave
@@ -55,6 +56,7 @@ CMD_CHUNK_ACK      = 0x82
 CMD_NAK            = 0x83
 CMD_OTA_RESULT     = 0x84
 CMD_STATUS_RSP     = 0x85
+CMD_OTA_READY      = 0x86
 
 # Error codes
 ERRORS = {
@@ -145,7 +147,8 @@ CRC32_TABLE = [
     0xB40BBE37, 0xC30C8EA1, 0x5A05DF1B, 0x2D02EF8D,
 ]
 
-def crc32(data: bytes, crc: int = 0xFFFFFFFF) -> int:
+def crc32(data: bytes, crc: int = 0) -> int:
+    """Standard IEEE CRC-32; pass a previous return value to continue."""
     crc ^= 0xFFFFFFFF
     for b in data:
         crc = CRC32_TABLE[(crc ^ b) & 0xFF] ^ (crc >> 8)
@@ -158,7 +161,7 @@ def crc32(data: bytes, crc: int = 0xFFFFFFFF) -> int:
 def build_frame(cmd: int, payload: bytes) -> bytes:
     """Build a protocol frame."""
     length = len(payload)
-    if length > 1024:
+    if length > PROTO_MAX_PAYLOAD:
         raise ValueError(f"Payload too large: {length}")
 
     # Header: SYNC + CMD + LEN(2 LE)
@@ -192,7 +195,7 @@ def parse_frame(ser: serial.Serial, timeout_ms: float = 5000) -> tuple[int, byte
     cmd = remaining[0]
     length = remaining[1] | (remaining[2] << 8)
 
-    if length > 1024:
+    if length > PROTO_MAX_PAYLOAD:
         print(f"  WARN: Invalid frame length {length}, discarding")
         return None
 
@@ -287,7 +290,7 @@ def send_ota(ser: serial.Serial, fw_path: str, version: int) -> bool:
             chunk_payload = struct.pack('<I', seq) + chunk_data[:chunk_len]
             ser.write(build_frame(CMD_OTA_CHUNK, chunk_payload))
 
-            resp = parse_frame(ser, timeout_ms=2000)
+            resp = parse_frame(ser, timeout_ms=3000)
             if resp is None:
                 print(f"  Chunk {seq}: timeout, retry {retry + 1}/{max_retries}")
                 continue
@@ -352,7 +355,7 @@ def send_ota(ser: serial.Serial, fw_path: str, version: int) -> bool:
 def query_status(ser: serial.Serial) -> None:
     """Send GET_STATUS and print response."""
     ser.write(build_frame(CMD_GET_STATUS, b''))
-    resp = parse_frame(ser, timeout_ms=2000)
+    resp = parse_frame(ser, timeout_ms=3000)
 
     if resp is None:
         print("No response from STM32.")
@@ -368,13 +371,18 @@ def query_status(ser: serial.Serial) -> None:
         print(f"Unexpected response: cmd=0x{cmd:02X}")
 
 
-def notify_ota(ser: serial.Serial, version: int) -> None:
-    """Send OTA_AVAILABLE to the running application."""
+def notify_ota(ser: serial.Serial, version: int) -> bool:
+    """Ask the running application to persist the OTA request and reset."""
     payload = struct.pack('<I', version)
     ser.write(build_frame(CMD_OTA_AVAILABLE, payload))
-    print(f"Sent OTA_AVAILABLE (version {version}).")
-    print("The STM32 application should reboot into the bootloader now.")
+    resp = parse_frame(ser, timeout_ms=2000)
+    if resp is None or resp[0] != CMD_OTA_READY:
+        print("ERROR: Application did not confirm OTA readiness.")
+        return False
+    print(f"Application confirmed OTA readiness for version {version}.")
+    print("The STM32 is rebooting into the bootloader now.")
     print("After reboot, run: python ota_sender.py <port> <firmware.bin> --version <version>")
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -388,7 +396,7 @@ def main():
         epilog="""
 Examples:
   python ota_sender.py /dev/tty.usbserial-XXXX fw_v2.bin --version 2
-  python ota_sender.py COM3 fw_v2.bin --version 2 --baud 115200
+  python ota_sender.py COM3 fw_v2.bin --version 2 --baud 9600
   python ota_sender.py /dev/tty.usbserial-XXXX --status
   python ota_sender.py /dev/tty.usbserial-XXXX --notify-ota --version 2
         """
@@ -397,7 +405,7 @@ Examples:
     parser.add_argument('port', help='Serial port (e.g., /dev/tty.usbserial-XXXX or COM3)')
     parser.add_argument('firmware', nargs='?', help='Firmware .bin file to send')
     parser.add_argument('--version', type=int, default=1, help='Firmware version number')
-    parser.add_argument('--baud', type=int, default=460800, help='Baud rate (default: 460800)')
+    parser.add_argument('--baud', type=int, default=9600, help='Baud rate (default: 9600)')
     parser.add_argument('--status', action='store_true', help='Query STM32 status')
     parser.add_argument('--notify-ota', action='store_true',
                         help='Send OTA_AVAILABLE to running application')
@@ -419,7 +427,8 @@ Examples:
         if args.status:
             query_status(ser)
         elif args.notify_ota:
-            notify_ota(ser, args.version)
+            if not notify_ota(ser, args.version):
+                sys.exit(1)
         elif args.firmware:
             if not os.path.exists(args.firmware):
                 print(f"ERROR: Firmware file not found: {args.firmware}")

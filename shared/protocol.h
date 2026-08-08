@@ -26,7 +26,7 @@ extern "C" {
  *---------------------------------------------------------------------------*/
 
 #define PROTO_SYNC_BYTE         0xA5U
-#define PROTO_MAX_PAYLOAD       1024U
+#define PROTO_MAX_PAYLOAD       1028U /* OTA chunk: sequence (4) + page data (1024) */
 #define PROTO_HEADER_SIZE       4U    /* SYNC + CMD + LEN(2) */
 #define PROTO_CRC_SIZE          4U    /* CRC32 LE */
 #define PROTO_MAX_FRAME         (PROTO_HEADER_SIZE + PROTO_MAX_PAYLOAD + PROTO_CRC_SIZE)
@@ -58,8 +58,9 @@ extern "C" {
 /* OTA window: bootloader waits this long (ms) for OTA_BEGIN after reset */
 #define OTA_WINDOW_MS           200U
 
-/* Per-chunk ACK timeout (ms) — ESP32 side */
-#define OTA_CHUNK_TIMEOUT_MS    500U
+/* Per-chunk ACK timeout (ms) — ESP32 side.
+ * A full 1 KiB chunk takes about 1.1 s on the current 9600-baud link. */
+#define OTA_CHUNK_TIMEOUT_MS    2000U
 /* Max retries per chunk */
 #define OTA_MAX_RETRIES         3U
 
@@ -83,6 +84,7 @@ extern "C" {
 #define CMD_NAK                 0x83U
 #define CMD_OTA_RESULT          0x84U
 #define CMD_STATUS_RSP          0x85U
+#define CMD_OTA_READY           0x86U  /* app saved OTA request and will reboot */
 
 /*---------------------------------------------------------------------------
  * Error codes (in NAK / RSP_ERROR payloads)
@@ -172,8 +174,10 @@ _Static_assert(sizeof(BootConfig_t) == 48, "BootConfig_t size mismatch");
  *
  * @param data   Input buffer.
  * @param len    Length in bytes.
- * @param crc    Running CRC (use 0xFFFFFFFF for first block).
- * @return       Updated CRC value.
+ * @param crc    Running finalized CRC (use 0 for the first block, then feed
+ *                each returned value into the next call).
+ * @return       Standard IEEE CRC-32 (polynomial 0xEDB88320) for all data
+ *                processed so far.
  */
 uint32_t proto_crc32(const uint8_t *data, size_t len, uint32_t crc);
 
@@ -181,7 +185,7 @@ uint32_t proto_crc32(const uint8_t *data, size_t len, uint32_t crc);
  * @brief One-shot CRC-32 over a buffer.
  */
 static inline uint32_t proto_crc32_buf(const uint8_t *data, size_t len) {
-    return proto_crc32(data, len, 0xFFFFFFFFU) ^ 0xFFFFFFFFU;
+    return proto_crc32(data, len, 0U);
 }
 
 /*---------------------------------------------------------------------------
