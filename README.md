@@ -116,24 +116,31 @@ PA5      (ADC) ───────────── MQ-2 烟雾 (经1k/2k分�
 
 ```bash
 pip install pyserial        # Python 工具
-# STM32CubeIDE              # STM32 开发
-# PlatformIO / ESP-IDF      # ESP32 开发
+pio --version               # PlatformIO（编译 STM32 两端 + ESP32）
+```
+
+### 构建
+
+```bash
+pio run -e bluepill                # Bootloader → .pio/build/bluepill/firmware.bin
+pio run -e app                     # Application → .pio/build/app/firmware.bin
+pio run -d esp32-comm-bridge       # ESP32 桥 → esp32-comm-bridge/.pio/build/esp32dev/firmware.bin
 ```
 
 ### 烧录
 
-1. **Bootloader**: STM32CubeIDE 编译 → ST-Link 烧录到 `0x08000000`
-2. **Application**: STM32CubeIDE 编译 → ST-Link 烧录到 `0x08002000`
-3. **ESP32**: `cd esp32-comm-bridge && pio run -t upload`
+1. **Bootloader**: ST-Link 烧录 `pio run -e bluepill` 产物到 `0x08000000`
+2. **Application**: ST-Link 烧录 `pio run -e app` 产物到 `0x08002000`
+3. **ESP32**: `pio run -d esp32-comm-bridge -t upload`（或 esptool 烧 firmware.bin）
 
 ### 测试
 
 ```bash
-# 查询 STM32 状态
-python tools/ota_sender.py /dev/tty.usbserial-XXXX --status
+# 查询 STM32 状态（Windows 串口用 COM 格式）
+python tools/ota_sender.py COM3 --status
 
 # OTA 固件升级
-python tools/ota_sender.py /dev/tty.usbserial-XXXX fw_v2.bin --version 2
+python tools/ota_sender.py COM3 fw_v2.bin --version 2
 
 # Web 仪表盘
 浏览器打开 http://<ESP32_IP>
@@ -141,17 +148,19 @@ python tools/ota_sender.py /dev/tty.usbserial-XXXX fw_v2.bin --version 2
 
 ## 蓝牙命令
 
-连接 ESP32 蓝牙 SPP 服务 `STM32-EnvMon`：
+连接 ESP32 蓝牙 SPP 服务 `STM32-OTA-Bridge`（手机用 "Serial Bluetooth Terminal"）：
 
 | 命令 | 说明 |
 |------|------|
-| `STATUS` | 返回 JSON 传感器数据 |
-| `TEMP` | 查询温湿度 |
-| `RELAY1 ON/OFF` | 控制继电器1 |
-| `MIST ON/OFF` | 控制雾化片 |
-| `SERVO 90` | 舵机角度 |
-| `AUTO/MANUAL` | 自动/手动模式 |
-| `OTA <url>` | 远程 OTA 升级 |
+| `STATUS` | 桥状态：BT/WiFi 连接、固件暂存情况 |
+| `VERSION` | 查询 STM32 当前固件版本 |
+| `OTA <url>` | 从 URL 下载固件并触发 OTA（版本从文件名 `fw_v<N>.bin` 解析） |
+| `FW <ver>,<crc32>` | 开始蓝牙推送固件（重置接收状态，记录版本+CRC） |
+| `SEND` | 把已暂存固件传输到 STM32（蓝牙推送完成后执行） |
+| `WIFI <ssid>,<pass>` | 配置 WiFi 并重连（存 NVS，重启后仍生效） |
+| `RESET` | 软件复位 ESP32 |
+
+> 传感器查询/控制类命令（TEMP/RELAY1/SERVO/AUTO 等）属于 docs 规划的 Phase 扩展，当前固件未实现。
 
 ## 目录结构
 
@@ -174,6 +183,24 @@ bluepill-ota/
 - 修复：`shared/protocol.h` 中 `BootConfig_t` 大小断言 56 → 48（实际 12×uint32=48B）；`FLASH_BASE`/`FLASH_PAGE_SIZE` 加 `#ifndef` 保护避免与 STM32 HAL 重定义
 - PC 端工具：`python tools/ota_sender.py COM3 fw.bin --version 2`（Windows 串口用 COM 格式）
 - 注意：ESP32 端编译需 PlatformIO 能访问官方包镜像（国内网络建议配置镜像源）
+
+## 本地验证记录（2026-08-08）
+
+**三端固件全部编译通过**（PlatformIO + ststm32 / espressif32）：
+
+| 固件 | RAM | Flash | 产物 |
+|------|-----|-------|------|
+| Bootloader | 11.0% (2252B) | 8.8% (5756B) | `.pio/build/bluepill/firmware.bin` |
+| Application | 74.8% (15320B) | 23.8% (15592B) | `.pio/build/app/firmware.bin` |
+| ESP32 Bridge | 21.8% (71464B) | 82.8% (1.52MB) | `esp32-comm-bridge/.pio/build/esp32dev/firmware.bin` |
+
+关键结论（细节见 [docs/build-notes.md](docs/build-notes.md)）：
+- **ESP-IDF 6 API 迁移**：`esp_spp_init`→`esp_spp_enhanced_init(&cfg)`；`esp_bt_dev_set_device_name`→`esp_bt_gap_set_device_name`；`esp_wifi_is_connected`→`esp_wifi_sta_get_ap_info()`
+- **ESP32 实际是 2MB Flash**（esp32dev 默认 4MB）：分区表 factory 1.75MB + storage(SPIFFS) 192KB；Bluedroid 固件 ~1.5MB，factory 必须这么大
+- **蓝牙组件用 sdkconfig.defaults 开启**（`-D CONFIG_BT_*` 编译宏对 ESP-IDF 无效）
+- **共享协议跨平台**：`shared/protocol.c` 已 C/C++ 兼容；ESP32 端镜像为 `src/protocol.cpp` 编译
+- **国内网络编译 ESP32 需代理**：`$env:HTTPS_PROXY='http://127.0.0.1:7897'; pio run -d esp32-comm-bridge`
+- Application 补了 72MHz 时钟配置（HSE→PLL×9）、heap 8KB→12KB
 
 ## 关键约束
 
