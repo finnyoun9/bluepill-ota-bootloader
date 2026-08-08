@@ -1,25 +1,31 @@
-# Build Notes — 2026-08-08
+# Build Notes — 2026-08-09
 
-> 三端固件编译打通记录。核心结论：三个目标（Bootloader / Application / ESP32 Bridge）都通过 PlatformIO 编译，代码层面 OTA 链路闭环。**尚未接硬件实测。**
+> 三端固件均能通过 PlatformIO 构建，且 Bluetooth SPP→ESP32→STM32 的 `VERSION` 往返已通过实机验证。完整 OTA 镜像传输仍未验收。
 
 ## 三端编译结果
 
 | 固件 | 工具链 | RAM | Flash | 产物 |
 |------|--------|-----|-------|------|
-| Bootloader | `pio run -e bluepill` | 11.0% (2252B) | 8.8% (5756B) | `.pio/build/bluepill/firmware.bin` |
-| Application | `pio run -e app` | 74.8% (15320B) | 23.8% (15592B) | `.pio/build/app/firmware.bin` |
-| ESP32 Bridge | `pio run -d esp32-comm-bridge` | 21.8% (71464B) | 82.8% (1.52MB / 1.75MB) | `esp32-comm-bridge/.pio/build/esp32dev/firmware.bin` |
+| Bootloader | `pio run -e bluepill` | 11.0% (2252B) | 10.9% (7128B) | `.pio/build/bluepill/firmware.bin` |
+| Application | `pio run -e app` | 85.0% (17408B) | 23.8% (15588B) | `.pio/build/app/firmware.bin` |
+| ESP32 Bridge | `pio run -d esp32-comm-bridge` | 19.7% (64448B) | 69.0% (1266293B / 1835008B) | `esp32-comm-bridge/.pio/build/esp32dev/firmware.bin` |
 
 - Bootloader 产物 ~6KB，满足 **8KB 硬约束**
-- Application 15.6KB，远小于 54KB 应用区
+- Application 仍在 54KB 应用区内；RAM 余量约 3KB，后续增加传感器任务时需持续关注
 - ESP32 开 Bluedroid 后固件 ~1.5MB，factory 分区必须 ≥ 1.5MB
+
+## 硬件 Bring-up（2026-08-09）
+
+- ESP32 CH340 串口为 `COM4`，STM32 通过 ST-Link SWD 烧录；两端写后校验均已通过。
+- 链路接线：`GPIO17 → PA10`、`GPIO16 ← PA9`、GND 直连；STM32 使用 USART1，双方暂定 9600 baud。
+- Windows Bluetooth Classic SPP 建立后，`COM6` 可发送 `STATUS` 与 `VERSION`；连续 10 次 `VERSION` 均返回 `FW Version: 0`。
 
 ## Application 编译要点
 
 原来 `application/` 从未编译过（缺 FreeRTOS 内核、HAL、时钟配置），本次补全：
 
 1. **Vendor FreeRTOS**：从 `framework-stm32cubef1/Middlewares/Third_Party/FreeRTOS/Source` 复制到 `application/lib/FreeRTOS/`（内核 + `GCC/ARM_CM3` 移植 + `heap_4`），根 `platformio.ini` 加 `[env:app]`
-2. **72MHz 时钟**：`main.c` 补 `SystemClock_Config()`（HSE 8MHz → PLL×9）。没有它 460800 波特率串口和 FreeRTOS tick 都不准
+2. **64MHz 时钟**：实物板已确认 8MHz HSE；`main.c` 与 bootloader 均使用 HSE→PLL×8。USART1 当前运行在 9600 baud，用于先验证整条硬件链路
 3. **FreeRTOS 必踩的坑**：
    - `configSUPPORT_STATIC_ALLOCATION=1` 时必须实现 `vApplicationGetIdleTaskMemory` / `vApplicationGetTimerTaskMemory`
    - 启动文件向量表用 `SVC_Handler`/`PendSV_Handler`，FreeRTOS 移植用 `vPortSVCHandler`/`xPortPendSVHandler` → 加薄包装函数
@@ -47,8 +53,8 @@ CONFIG_BT_BLUEDROID_ENABLED=y
 CONFIG_BT_CLASSIC_ENABLED=y
 CONFIG_BT_SPP_ENABLED=y
 CONFIG_BT_CONTROLLER_ENABLED=y
-CONFIG_BTDM_CTRL_MODE_BTDM=y      # IDF 6 的符号，不是老的 BT_BTDM_CTRL_MODE
-CONFIG_BTDM_CTRL_BLE_MAX_CONN=0
+CONFIG_BT_BLE_ENABLED=n
+CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=y  # Classic-only SPP；释放 BLE RAM
 ```
 
 ### 3. Flash 是 2MB 不是 4MB
@@ -88,8 +94,10 @@ pio run -d esp32-comm-bridge
 
 > 注意：SPP 回调里必须显式携带字节长度，固件 bin 含 NUL 字节，`strlen` 会截断。
 
+> 当前已实测文本命令的 `STATUS` / `VERSION`。蓝牙二进制暂存、应用切入 bootloader、分块写入和镜像 CRC 必须作为一次独立的端到端 OTA 验收执行。
+
 ## 下一步
 
-- [ ] 接硬件实测：ST-Link 烧 bootloader/app，`pio run -d esp32-comm-bridge -t upload` 烧 ESP32
-- [ ] `python tools/ota_sender.py COM3 fw_v2.bin --version 2` 验证端到端 OTA
+- [x] 实机烧录 Bootloader / Application / ESP32，并验证 Bluetooth SPP 到 STM32 的双向命令链路
+- [ ] 用一份已构建的 `app/firmware.bin` 验证端到端 OTA（暂存、触发重启、分块、CRC、回跳）
 - [ ] 按 `project-framework.md` 的 Phase 0-7 上传感器驱动层（简历项目目标）

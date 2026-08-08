@@ -16,11 +16,11 @@
 │  │ Server   │  │ Client   │  │ (download/stage/xfer)│  │
 │  └────┬─────┘  └────┬─────┘  └──────────┬───────────┘  │
 │       └──────────────┴───────────────────┘              │
-│                         │ UART 460800                    │
+│                         │ UART 9600                      │
 │                    SPIFFS (/fw.bin)                      │
 └─────────────────────────┬────────────────────────────────┘
                           │
-                          │ UART (PA2/PA3)
+                          │ USART1 (PA9/PA10)
                           │
 ┌─────────────────────────┴────────────────────────────────┐
 │                   STM32F103C8T6                           │
@@ -66,6 +66,8 @@
 6. **Transfer** — ESP32 sends 1KB chunks via `CMD_OTA_CHUNK`, bootloader erases+programs flash
 7. **Verify** — ESP32 sends `CMD_OTA_END`, bootloader computes CRC-32 over full image
 8. **Commit** — CRC match: write config, jump to new application
+
+> 硬件 bring-up 已验证 Bluetooth SPP 到 STM32 应用的 `VERSION` 往返（10/10）。完整固件传输、CRC 校验和回跳仍需单独验收。
 
 ## Key Design Decisions
 

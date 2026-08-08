@@ -7,7 +7,7 @@
  *     files and text commands.
  *   - WiFi HTTP client: downloads firmware from a URL.
  *   - UART link: communicates with STM32 bootloader/application using the
- *     shared protocol (460800 baud, framed, CRC-32).
+ *     shared protocol (9600 baud, framed, CRC-32).
  *   - Orchestrator: manages firmware staging (SPIFFS) and transfer state.
  *
  * Text commands over BT SPP:
@@ -67,7 +67,7 @@ static const char *TAG = "bridge";
 #define UART_STM32_RXD          16
 #define UART_STM32_RTS          UART_PIN_NO_CHANGE
 #define UART_STM32_CTS          UART_PIN_NO_CHANGE
-#define UART_STM32_BAUD         460800
+#define UART_STM32_BAUD         9600
 #define UART_STM32_BUF_SIZE     2048
 
 /* BT SPP */
@@ -113,6 +113,11 @@ static bool            g_fw_staged = false;
 static uint32_t        g_fw_size = 0;
 static uint32_t        g_fw_version = 0;
 static uint32_t        g_fw_crc32 = 0;
+
+/* Bluetooth SPP is a byte stream, so a terminal command can arrive in
+ * several ESP_SPP_DATA_IND_EVT callbacks. Accumulate it through CR/LF. */
+static char             g_cmd_buf[256];
+static size_t           g_cmd_len = 0;
 
 /*---------------------------------------------------------------------------
  * Forward declarations
@@ -221,8 +226,20 @@ static void spp_callback(esp_spp_cb_event_t event, esp_spp_cb_param_t *param) {
     switch (event) {
     case ESP_SPP_INIT_EVT:
         ESP_LOGI(TAG, "SPP init");
-        esp_spp_start_srv(ESP_SPP_SEC_AUTHENTICATE, ESP_SPP_ROLE_SLAVE,
-                          0, SPP_SERVER_NAME);
+        ESP_ERROR_CHECK(esp_spp_start_srv(ESP_SPP_SEC_AUTHENTICATE,
+                                          ESP_SPP_ROLE_SLAVE,
+                                          0, SPP_SERVER_NAME));
+        break;
+
+    case ESP_SPP_START_EVT:
+        if (param->start.status == ESP_SPP_SUCCESS) {
+            ESP_ERROR_CHECK(esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE,
+                                                     ESP_BT_GENERAL_DISCOVERABLE));
+            ESP_LOGI(TAG, "SPP server discoverable: %s", SPP_SERVER_NAME);
+        } else {
+            ESP_LOGE(TAG, "Failed to start SPP server: status=%d",
+                     param->start.status);
+        }
         break;
 
     case ESP_SPP_SRV_OPEN_EVT:
@@ -258,6 +275,7 @@ static void spp_callback(esp_spp_cb_event_t event, esp_spp_cb_param_t *param) {
 static void bt_spp_init(void) {
     g_spp_queue = xQueueCreate(32, sizeof(SppData_t));
 
+    /* sdkconfig selects Classic-only SPP, so BLE RAM is not needed. */
     ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_BLE));
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_bt_controller_init(&bt_cfg));
@@ -301,6 +319,44 @@ static void bt_recv_task(void *pv) {
         if (xQueueReceive(g_spp_queue, &item, portMAX_DELAY) == pdPASS) {
             uint8_t *data = item.data;
             size_t   len  = item.len;
+
+            /* Reassemble a terminal command. SPP does not preserve the
+             * write boundaries of the PC serial terminal. */
+            if (g_cmd_len > 0 ||
+                (len > 0 && ((data[0] >= 'A' && data[0] <= 'Z') ||
+                             (data[0] >= 'a' && data[0] <= 'z')))) {
+                bool command_ready = false;
+
+                for (size_t i = 0; i < len; i++) {
+                    if (data[i] == '\r' || data[i] == '\n') {
+                        if (g_cmd_len > 0) {
+                            uint8_t *line = (uint8_t *)malloc(g_cmd_len + 1);
+                            if (line) {
+                                memcpy(line, g_cmd_buf, g_cmd_len);
+                                line[g_cmd_len] = '\0';
+                                free(data);
+                                data = line;
+                                len = g_cmd_len;
+                                command_ready = true;
+                            }
+                            g_cmd_len = 0;
+                        }
+                        break;
+                    }
+
+                    if (data[i] < 0x20 || data[i] > 0x7E ||
+                        g_cmd_len >= sizeof(g_cmd_buf) - 1) {
+                        g_cmd_len = 0;
+                        break;
+                    }
+                    g_cmd_buf[g_cmd_len++] = (char)data[i];
+                }
+
+                if (!command_ready) {
+                    free(data);
+                    continue;
+                }
+            }
 
             /* Simple text command detection: starts with ASCII letter */
             if (len > 0 && data[0] >= 'A' && data[0] <= 'Z') {

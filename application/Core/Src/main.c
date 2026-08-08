@@ -59,15 +59,14 @@ static void SystemClock_Config(void) {
 
     __HAL_RCC_PWR_CLK_ENABLE();
 
-    /* HSE 8MHz crystal → PLL ×9 → SYSCLK 72MHz (Blue Pill standard) */
+    /* 8MHz HSE crystal → PLL ×8 → SYSCLK 64MHz. */
     osc.OscillatorType = RCC_OSCILLATORTYPE_HSE;
     osc.HSEState       = RCC_HSE_ON;
-    osc.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
     osc.PLL.PLLState   = RCC_PLL_ON;
     osc.PLL.PLLSource  = RCC_PLLSOURCE_HSE;
-    osc.PLL.PLLMUL     = RCC_PLL_MUL9;
+    osc.PLL.PLLMUL     = RCC_PLL_MUL8;
     if (HAL_RCC_OscConfig(&osc) != HAL_OK) {
-        /* HSE fail → hang; LED stays off to signal clock fault */
+        /* Clock configuration failure → halt with LED off. */
         while (1);
     }
 
@@ -75,8 +74,8 @@ static void SystemClock_Config(void) {
                        | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
     clk.SYSCLKSource   = RCC_SYSCLKSOURCE_PLLCLK;
     clk.AHBCLKDivider  = RCC_SYSCLK_DIV1;
-    clk.APB1CLKDivider = RCC_HCLK_DIV2;   /* PCLK1 = 36MHz (max 36MHz) */
-    clk.APB2CLKDivider = RCC_HCLK_DIV1;   /* PCLK2 = 72MHz */
+    clk.APB1CLKDivider = RCC_HCLK_DIV2;   /* PCLK1 = 32MHz (max 36MHz) */
+    clk.APB2CLKDivider = RCC_HCLK_DIV1;   /* PCLK2 = 64MHz */
     if (HAL_RCC_ClockConfig(&clk, FLASH_LATENCY_2) != HAL_OK) {
         while (1);
     }
@@ -316,7 +315,7 @@ void cmd_handler_send_frame(uint8_t cmd, const uint8_t *payload, uint16_t len) {
     uint8_t buf[PROTO_MAX_FRAME];
     uint16_t total = proto_build_frame(buf, sizeof(buf), cmd, payload, len);
     if (total > 0) {
-        /* Send over UART in task context (send is blocking but fast at 460800) */
+        /* Send over UART in task context (send is blocking but fast at 115200) */
         uart_comm_send(buf, total);
     }
 }
@@ -331,8 +330,8 @@ int main(void) {
 
     system_init();
 
-    /* Initialize UART2 for ESP32 communication */
-    uart_comm_init(460800U);
+    /* Initialize USART1 (PA9/PA10) for ESP32 communication. */
+    uart_comm_init(9600U);
 
     /* Create FreeRTOS primitives and tasks */
     app_tasks_init();

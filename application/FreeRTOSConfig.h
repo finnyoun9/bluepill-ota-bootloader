@@ -22,7 +22,7 @@
 #define configTICK_RATE_HZ                      1000U   /* 1 ms tick */
 #define configMAX_PRIORITIES                    8
 #define configMINIMAL_STACK_SIZE                128U
-#define configTOTAL_HEAP_SIZE                   ((size_t)(12 * 1024))  /* 12KB heap: 5 dynamic tasks need ~11KB */
+#define configTOTAL_HEAP_SIZE                   ((size_t)(14 * 1024))  /* Tasks + 16 x 64-byte data queue + RTOS objects. */
 #define configMAX_TASK_NAME_LEN                 16
 #define configUSE_TRACE_FACILITY                1
 #define configUSE_16_BIT_TICKS                  0

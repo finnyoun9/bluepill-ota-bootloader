@@ -29,7 +29,7 @@
 #define BOOT0_PORT              GPIOB
 #define BOOT0_PIN               GPIO_PIN_0     /* PB0 — force-bootloader jumper */
 
-#define USART_BAUD              460800U
+#define USART_BAUD              9600U
 
 /*---------------------------------------------------------------------------
  * Static data (RAM only — bootloader is single-threaded)
@@ -47,6 +47,7 @@ static uint32_t              g_ticks_at_boot;  /* HAL tick at reset */
  *---------------------------------------------------------------------------*/
 
 static void system_init(void);
+static void SystemClock_Config(void);
 static void uart_init(void);
 static void led_on(void);
 static void led_off(void);
@@ -109,12 +110,11 @@ static bool flash_erase_app_region(void) {
 static void system_init(void) {
     HAL_Init();
 
-    /* Enable HSE and configure 72MHz system clock */
-    /* In a CubeIDE project this is generated as SystemClock_Config().
-     * For brevity, the minimal path is shown — in practice use CubeMX. */
+    SystemClock_Config();
+
     __HAL_RCC_GPIOB_CLK_ENABLE();
     __HAL_RCC_GPIOC_CLK_ENABLE();
-    __HAL_RCC_USART2_CLK_ENABLE();
+    __HAL_RCC_USART1_CLK_ENABLE();
 
     /* LED PC13 */
     GPIO_InitTypeDef gpio = {0};
@@ -132,8 +132,33 @@ static void system_init(void) {
     HAL_GPIO_Init(BOOT0_PORT, &gpio);
 }
 
+/* 8MHz HSE crystal → PLL ×8 → SYSCLK 64MHz. */
+static void SystemClock_Config(void) {
+    RCC_OscInitTypeDef osc = {0};
+    RCC_ClkInitTypeDef clk = {0};
+
+    osc.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+    osc.HSEState       = RCC_HSE_ON;
+    osc.PLL.PLLState   = RCC_PLL_ON;
+    osc.PLL.PLLSource  = RCC_PLLSOURCE_HSE;
+    osc.PLL.PLLMUL     = RCC_PLL_MUL8;
+    if (HAL_RCC_OscConfig(&osc) != HAL_OK) {
+        while (1);
+    }
+
+    clk.ClockType      = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
+                       | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+    clk.SYSCLKSource   = RCC_SYSCLKSOURCE_PLLCLK;
+    clk.AHBCLKDivider  = RCC_SYSCLK_DIV1;
+    clk.APB1CLKDivider = RCC_HCLK_DIV2;
+    clk.APB2CLKDivider = RCC_HCLK_DIV1;
+    if (HAL_RCC_ClockConfig(&clk, FLASH_LATENCY_2) != HAL_OK) {
+        while (1);
+    }
+}
+
 static void uart_init(void) {
-    g_huart2.Instance          = USART2;
+    g_huart2.Instance          = USART1;
     g_huart2.Init.BaudRate     = USART_BAUD;
     g_huart2.Init.WordLength   = UART_WORDLENGTH_8B;
     g_huart2.Init.StopBits     = UART_STOPBITS_1;
@@ -145,8 +170,8 @@ static void uart_init(void) {
 
     /* Enable RXNE interrupt */
     __HAL_UART_ENABLE_IT(&g_huart2, UART_IT_RXNE);
-    HAL_NVIC_SetPriority(USART2_IRQn, 2, 0);
-    HAL_NVIC_EnableIRQ(USART2_IRQn);
+    HAL_NVIC_SetPriority(USART1_IRQn, 2, 0);
+    HAL_NVIC_EnableIRQ(USART1_IRQn);
 }
 
 /*---------------------------------------------------------------------------
@@ -166,8 +191,8 @@ static uint32_t elapsed_ms(void) {
  *---------------------------------------------------------------------------*/
 
 static void uart_send_byte(uint8_t byte) {
-    while (!(USART2->SR & USART_SR_TXE));
-    USART2->DR = byte;
+    while (!(USART1->SR & USART_SR_TXE));
+    USART1->DR = byte;
 }
 
 static void uart_send_frame(uint8_t cmd, const uint8_t *payload, uint16_t len) {
@@ -224,14 +249,18 @@ void bootloader_jump_to_app(void) {
         NVIC->ICPR[i] = 0xFFFFFFFF;
     }
 
-    /* Reset USART2 to clean state for application */
-    USART2->CR1 = 0;
+    /* Reset USART1 to clean state for application */
+    USART1->CR1 = 0;
 
     /* Set the vector table offset to application base */
     SCB->VTOR = APP_BASE;
 
     /* Set main stack pointer from application vector table */
     __set_MSP(*(volatile uint32_t *)APP_BASE);
+
+    /* PRIMASK survives a function jump.  The application uses SysTick and
+     * PendSV for FreeRTOS, so it must receive interrupts enabled. */
+    __enable_irq();
 
     /* Jump to application reset handler */
     void (*app_reset)(void) = (void (*)(void))(*(volatile uint32_t *)(APP_BASE + 4));
@@ -450,12 +479,12 @@ static void process_ota_abort(void) {
  *---------------------------------------------------------------------------*/
 
 /**
- * @brief Try to read a byte from UART2 (non-blocking).
+ * @brief Try to read a byte from USART1 (non-blocking).
  * @return true if a byte was read into *byte.
  */
 static bool uart_read_byte_nonblock(uint8_t *byte) {
-    if (USART2->SR & USART_SR_RXNE) {
-        *byte = (uint8_t)(USART2->DR & 0xFF);
+    if (USART1->SR & USART_SR_RXNE) {
+        *byte = (uint8_t)(USART1->DR & 0xFF);
         return true;
     }
     return false;
@@ -655,13 +684,24 @@ ota_active:
 }
 
 /*---------------------------------------------------------------------------
+ * SysTick interrupt
+ *---------------------------------------------------------------------------*/
+
+/* HAL_Init() installs SysTick as the bootloader time base.  Without this
+ * strong handler the startup file's weak default handler loops forever on
+ * the first tick, so the OTA timeout can never reach the application jump. */
+void SysTick_Handler(void) {
+    HAL_IncTick();
+}
+
+/*---------------------------------------------------------------------------
  * UART RX interrupt handler
  *---------------------------------------------------------------------------*/
 
-void USART2_IRQHandler(void) {
+void USART1_IRQHandler(void) {
     /* RXNE: byte received */
-    if (USART2->SR & USART_SR_RXNE) {
-        uint8_t byte = (uint8_t)(USART2->DR & 0xFF);
+    if (USART1->SR & USART_SR_RXNE) {
+        uint8_t byte = (uint8_t)(USART1->DR & 0xFF);
 
         /* Feed parser directly in ISR — keeps it simple in the bootloader
          * since there's no RTOS to defer to. Parser state is purely CPU-bound. */
@@ -669,8 +709,8 @@ void USART2_IRQHandler(void) {
     }
 
     /* Overrun error: clear by reading DR + SR */
-    if (USART2->SR & USART_SR_ORE) {
-        (void)USART2->DR;
+    if (USART1->SR & USART_SR_ORE) {
+        (void)USART1->DR;
     }
 }
 
@@ -679,16 +719,22 @@ void USART2_IRQHandler(void) {
  *---------------------------------------------------------------------------*/
 
 void HAL_UART_MspInit(UART_HandleTypeDef *huart) {
-    if (huart->Instance == USART2) {
+    if (huart->Instance == USART1) {
         GPIO_InitTypeDef gpio = {0};
 
         __HAL_RCC_GPIOA_CLK_ENABLE();
 
-        /* PA2 = TX, PA3 = RX */
-        gpio.Pin       = GPIO_PIN_2 | GPIO_PIN_3;
+        /* PA9 = TX (alternate-function push-pull) */
+        gpio.Pin       = GPIO_PIN_9;
         gpio.Mode      = GPIO_MODE_AF_PP;
         gpio.Pull      = GPIO_NOPULL;
         gpio.Speed     = GPIO_SPEED_FREQ_HIGH;
+        HAL_GPIO_Init(GPIOA, &gpio);
+
+        /* PA10 = RX (input floating) */
+        gpio.Pin       = GPIO_PIN_10;
+        gpio.Mode      = GPIO_MODE_INPUT;
+        gpio.Pull      = GPIO_NOPULL;
         HAL_GPIO_Init(GPIOA, &gpio);
     }
 }
