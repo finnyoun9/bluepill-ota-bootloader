@@ -252,6 +252,10 @@ bluepill-ota/
 - Bootloader 固定 8KB → 不能超出
 - Application 起始于 `0x08002000` → 必须设置 `SCB->VTOR`
 
+### 已知限制：OTA 传输中途掉电无回退
+
+Bootloader 收到第一个 chunk 就会擦除 Application 区第 0 页（含中断向量表），所以 OTA 传输中途掉电会让旧固件立即失效：下次上电 `app_is_valid()` 判定应用无效，设备停在 Bootloader 的 maintenance 模式，需要重新完成一次 OTA 或用 ST-Link 重刷才能恢复。这是 64KB 单 Bank Flash、没有预留 A/B 分区空间的直接结果——生产级方案通常会先写暂存区、整体校验后再原子切换，但在 8KB Bootloader + 54KB Application 的预算下没有空间做这件事。建议 OTA 过程中保证电源稳定，避免中途拔线断电。
+
 ## License
 
 MIT

@@ -59,7 +59,8 @@ extern "C" {
 #define OTA_WINDOW_MS           200U
 
 /* Per-chunk ACK timeout (ms) — ESP32 side.
- * A full 1 KiB chunk takes about 1.1 s on the current 9600-baud link. */
+ * Sized for the original 9600-baud bring-up link (~1.1s per 1 KiB chunk);
+ * generous headroom at the current 115200 baud, safe to tighten later. */
 #define OTA_CHUNK_TIMEOUT_MS    2000U
 /* Max retries per chunk */
 #define OTA_MAX_RETRIES         3U

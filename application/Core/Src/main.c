@@ -108,6 +108,39 @@ static void ramfunc_init(void) {
     }
 }
 
+/*---------------------------------------------------------------------------
+ * Independent watchdog (IWDG)
+ *
+ * Runs off the ~40kHz LSI, independent of SysTick and interrupts, so it
+ * still fires if the CPU gets stuck in a disabled-interrupt loop (e.g.
+ * vApplicationStackOverflowHook) or an unhandled fault. Register-level
+ * (not HAL_IWDG_*) so it does not depend on HAL_IWDG_MODULE_ENABLED being
+ * set in stm32f1xx_hal_conf.h.
+ *
+ * IWDG keeps counting across NVIC_SystemReset() (only a power-on reset
+ * clears it), including the bootloader→application jump used for OTA, so
+ * both binaries arm it with the same ~4s timeout and refresh it
+ * independently — see bootloader/Core/Src/main.c.
+ *---------------------------------------------------------------------------*/
+
+static void iwdg_init(void) {
+    IWDG->KR  = 0xCCCCU;   /* start the watchdog */
+    IWDG->KR  = 0x5555U;   /* unlock PR/RLR for writing */
+    IWDG->PR  = 4U;        /* /64 prescaler */
+    IWDG->RLR = 2499U;     /* ~4.0s @ nominal 40kHz LSI */
+
+    uint32_t guard = 100000U;
+    while ((IWDG->SR != 0U) && (--guard != 0U)) {
+        /* wait for the prescaler/reload update to latch */
+    }
+
+    IWDG->KR = 0xAAAAU;    /* load the counter from RLR */
+}
+
+static void iwdg_refresh(void) {
+    IWDG->KR = 0xAAAAU;
+}
+
 static void system_init(void) {
     /* VTOR relocation — MUST be first */
     SCB->VTOR = APP_BASE;
@@ -337,7 +370,7 @@ static void ui_render_system(void) {
     } else {
         oled_show_string(2U, 5U, "N/A ");
     }
-    oled_show_string(3U, 1U, "UART: 9600");
+    oled_show_string(3U, 1U, "UART: 115200");
     oled_show_string(4U, 1U, "PRESS TO BACK");
 }
 
@@ -533,8 +566,7 @@ static void vMonitorTask(void *pvParameters) {
         size_t free_heap = xPortGetFreeHeapSize();
         (void)free_heap; /* Can be logged via debug UART */
 
-        /* IWDG refresh — if watchdog is enabled */
-        /* HAL_IWDG_Refresh(&hiwdg); */
+        iwdg_refresh();
 
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
@@ -626,7 +658,7 @@ void cmd_handler_send_frame(uint8_t cmd, const uint8_t *payload, uint16_t len) {
     uint8_t buf[PROTO_MAX_FRAME];
     uint16_t total = proto_build_frame(buf, sizeof(buf), cmd, payload, len);
     if (total > 0) {
-        /* Send over UART in task context (blocking, but small at 9600 baud). */
+        /* Send over UART in task context (blocking, but the payload is small). */
         uart_comm_send(buf, total);
     }
 }
@@ -642,9 +674,10 @@ int main(void) {
     SCB->VTOR = APP_BASE;
 
     system_init();
+    iwdg_init();
 
     /* Initialize USART1 (PA9/PA10) for ESP32 communication. */
-    uart_comm_init(9600U);
+    uart_comm_init(115200U);
 
     /* PB6/PB7: OLED, BH1750, AHT20 and BMP280 on I2C1.
      * PA6/PA7: encoder A/B; encoder C is tied to GND.

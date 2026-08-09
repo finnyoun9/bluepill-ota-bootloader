@@ -396,7 +396,7 @@ def main():
         epilog="""
 Examples:
   python ota_sender.py /dev/tty.usbserial-XXXX fw_v2.bin --version 2
-  python ota_sender.py COM3 fw_v2.bin --version 2 --baud 9600
+  python ota_sender.py COM3 fw_v2.bin --version 2 --baud 115200
   python ota_sender.py /dev/tty.usbserial-XXXX --status
   python ota_sender.py /dev/tty.usbserial-XXXX --notify-ota --version 2
         """
@@ -405,7 +405,7 @@ Examples:
     parser.add_argument('port', help='Serial port (e.g., /dev/tty.usbserial-XXXX or COM3)')
     parser.add_argument('firmware', nargs='?', help='Firmware .bin file to send')
     parser.add_argument('--version', type=int, default=1, help='Firmware version number')
-    parser.add_argument('--baud', type=int, default=9600, help='Baud rate (default: 9600)')
+    parser.add_argument('--baud', type=int, default=115200, help='Baud rate (default: 115200)')
     parser.add_argument('--status', action='store_true', help='Query STM32 status')
     parser.add_argument('--notify-ota', action='store_true',
                         help='Send OTA_AVAILABLE to running application')
