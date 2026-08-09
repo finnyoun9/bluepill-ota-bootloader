@@ -6,6 +6,10 @@
 
 ## Current status / 当前状态
 
+- Phone-driven Web OTA is hardware-verified: an iPhone connected directly to the ESP32 SoftAP, uploaded the STM32 application, and completed the update without a PC-side sender.
+- 手机 Web OTA 已通过实机验证：iPhone 直连 ESP32 SoftAP、上传 STM32 Application，并在不使用电脑发包工具的情况下完成升级。
+- The Web update moved the target from firmware version 1 to 2; a follow-up Bluetooth `VERSION` query returned `FW Version: 2`.
+- Web 升级将目标版本从 1 更新到 2；随后通过蓝牙 `VERSION` 查询得到 `FW Version: 2`。
 - The full PC → Bluetooth SPP → ESP32 SPIFFS → STM32 bootloader → Flash/CRC → application path is now hardware-verified.
 - PC → 蓝牙 SPP → ESP32 SPIFFS → STM32 Bootloader → Flash/CRC → Application 的完整路径现已通过实机验证。
 - A 15,956-byte application image (`CRC32 0x3B274D7E`) completed OTA successfully, and the updated STM32 application replied `FW Version: 1` after reboot.
@@ -14,6 +18,18 @@
 - 三端固件均可构建；协议烟测同时覆盖经典 CRC 向量和全字节向量；当前硬件接线在 USART1 9600 baud 下稳定工作。
 
 ## Milestones / 里程碑
+
+### v0.11 — Phone-driven Web OTA / 手机独立完成 Web OTA
+
+**Commit:** [`5b6ab60`](https://github.com/finnyoun9/bluepill-ota-bootloader/commit/5b6ab60)
+
+- 中文：ESP32 新增常驻 SoftAP `STM32-OTA-Bridge` 和响应式 OTA 页面，iPhone 连接热点后访问 `192.168.4.1` 即可选择 Application `.bin`、填写版本并查看上传/写入状态。
+- English: Added an always-available `STM32-OTA-Bridge` SoftAP and a responsive OTA page. An iPhone can connect to `192.168.4.1`, choose an application image, set its version, and follow upload/programming status.
+- 中文：新增 `GET /api/status`、`POST /api/upload`、`POST /api/start`；上传过程流式写入 SPIFFS，不把完整固件放进 RAM。OTA 任务与蓝牙路径共用互斥锁，避免两个入口同时操作 STM32。
+- English: Added `GET /api/status`, `POST /api/upload`, and `POST /api/start`. Uploads stream into SPIFFS instead of buffering a full image in RAM, while a shared mutex prevents concurrent Web/Bluetooth transfers.
+- 中文：除大小和 CRC 外，ESP32 还检查 Cortex-M 初始栈、Thumb Reset Vector 和 `0x08002000..0x0800F800` Application 地址范围，防止误传 Bootloader 或无关固件。
+- English: Beyond size and CRC checks, the bridge validates the Cortex-M stack pointer, Thumb reset vector, and the `0x08002000..0x0800F800` application range to reject bootloader or unrelated binaries.
+- 验证 / Validation: iPhone 上传 15,956-byte `fw_v2.bin` 后页面完成 OTA；COM6 查询返回 `FW Version: 2`。ESP32 构建占用 RAM 65,152 B（19.9%）、Flash 1,349,653 B（73.6%）。 / The iPhone-uploaded 15,956-byte image completed OTA, and COM6 reported firmware version 2.
 
 ### v0.10 — Hardware-verified end-to-end OTA / 实机验证完整 OTA 闭环
 

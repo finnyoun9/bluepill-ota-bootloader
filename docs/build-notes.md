@@ -8,7 +8,7 @@
 |------|--------|-----|-------|------|
 | Bootloader | `pio run -e bluepill` | 11.0% (2260B) | 10.7% (7032B) | `.pio/build/bluepill/firmware.bin` |
 | Application | `pio run -e app` | 85.0% (17408B) | 23.8% (15604B) | `.pio/build/app/firmware.bin` |
-| ESP32 Bridge | `pio run -d esp32-comm-bridge` | 19.7% (64456B) | 69.3% (1271101B / 1835008B) | `esp32-comm-bridge/.pio/build/esp32dev/firmware.bin` |
+| ESP32 Bridge | `pio run -d esp32-comm-bridge` | 19.9% (65152B) | 73.6% (1349653B / 1835008B) | `esp32-comm-bridge/.pio/build/esp32dev/firmware.bin` |
 
 - Bootloader 产物 ~6KB，满足 **8KB 硬约束**
 - Application 仍在 54KB 应用区内；RAM 余量约 3KB，后续增加传感器任务时需持续关注
@@ -106,8 +106,18 @@ pio run -d esp32-comm-bridge
 - 在 `tools/protocol_smoke_test.c` 增加 `0x00..0xFF → 0x29058C73` 全字节向量
 - 用真实 15,956 字节固件的 `0x3B274D7E` 完成 ESP32 暂存和 STM32 Bootloader 双端 CRC 验证
 
+## 手机 Web OTA（2026-08-09）
+
+- ESP32 使用 `WIFI_MODE_APSTA`，常驻 SoftAP：SSID `STM32-OTA-Bridge`，默认密码 `stm32ota`，入口 `http://192.168.4.1`
+- `web_ota_page.h` 存在 ESP32 Application 的只读段，不占 SPIFFS；SPIFFS 可完整用于 54KB STM32 固件暂存
+- API：`GET /api/status`、`POST /api/upload?version=<N>`、`POST /api/start`
+- 上传采用固定 1KB 缓冲区流式写文件；检查大小、CRC、初始 SP、Thumb Reset Vector 和 Application 地址范围
+- Web/蓝牙传输共用 FreeRTOS Mutex；真正的 STM32 OTA 在独立 8KB 栈任务中执行，HTTP 状态查询不会被 9600-baud 写入过程阻塞
+- 实机结果：iPhone 上传 15,956 字节 `fw_v2.bin`，页面完成升级；COM6 查询得到 `FW Version: 2`
+
 ## 下一步
 
 - [x] 实机烧录 Bootloader / Application / ESP32，并验证 Bluetooth SPP 到 STM32 的双向命令链路
 - [x] 用已构建的 `app/firmware.bin` 验证端到端 OTA（暂存、触发重启、分块、CRC、回跳）
+- [x] 用 iPhone 直连 ESP32 SoftAP，验证无需 PC 发包工具的 Web OTA
 - [ ] 按 `project-framework.md` 的 Phase 0-7 完成传感器驱动层（简历项目目标）

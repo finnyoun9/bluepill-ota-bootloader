@@ -214,7 +214,9 @@ GND ──── 面包板 GND 轨 ──── 所有模块 GND（共地）
 
 ### 4.1 Web 仪表盘（ESP32 直接提供）
 
-ESP32 在 SPIFFS 中存放一个 HTML 页面，通过 HTTP 提供访问，WebSocket 推送实时数据。
+当前已实现并实机验证的是独立的手机 Web OTA：ESP32 常驻 SoftAP `STM32-OTA-Bridge`，浏览器访问 `http://192.168.4.1`，页面从固件只读段提供，SPIFFS 专门用于暂存 STM32 Application。接口为 `GET /api/status`、`POST /api/upload?version=<N>`、`POST /api/start`。
+
+下面的传感器仪表盘、WebSocket 和控制接口仍是 Phase 4 规划，不应理解为已经实现：
 
 ```
 ESP32 启动后：
@@ -238,7 +240,7 @@ ESP32 启动后：
 
 ### 4.2 手机端
 
-**方案 A（推荐，零开发）**：手机浏览器直接打开 `http://<ESP32_IP>` 即可用 Web 仪表盘，已做响应式。
+**方案 A（当前已实现）**：手机连接 `STM32-OTA-Bridge` 热点并打开 `http://192.168.4.1`，可完成 STM32 Application OTA。传感器仪表盘仍待 Phase 4。
 
 **方案 B（蓝牙）**：手机装一个 "Serial Bluetooth Terminal" APP，连接 ESP32 蓝牙 SPP，发文本命令：
 ```

@@ -15,6 +15,7 @@
 │  │ BT SPP   │  │ WiFi HTTP│  │ OTA Orchestrator     │  │
 │  │ Server   │  │ Client   │  │ (download/stage/xfer)│  │
 │  └────┬─────┘  └────┬─────┘  └──────────┬───────────┘  │
+│  SoftAP + Web OTA: STM32-OTA-Bridge / http://192.168.4.1 │
 │       └──────────────┴───────────────────┘              │
 │                         │ UART 9600                      │
 │                    SPIFFS (/fw.bin)                      │
@@ -69,6 +70,8 @@
 
 > 2026-08-09 已完成实机闭环：15,956 字节镜像通过 Bluetooth SPP 暂存，STM32 Bootloader 完成擦写与 CRC 校验，回跳后的 Application 返回 `FW Version: 1`。
 
+The phone path uses the same steps after staging: `POST /api/upload?version=<N>` streams a binary image into SPIFFS, validates CRC and Cortex-M application vectors, then `POST /api/start` launches the shared OTA worker. `GET /api/status` exposes progress. The iPhone hardware test upgraded the application to version 2 without a PC sender.
+
 ## Key Design Decisions
 
 ### 1. Bootloader Does All Flash Work
@@ -86,6 +89,8 @@ STM32F103 has a single flash bank — code executing from flash stalls during er
 Simple length-prefixed frames with standard IEEE CRC-32. Chunk data is at most 1KB (one flash page) for direct mapping: `addr = APP_BASE + seq * 1024`; an OTA chunk payload is 1028 bytes because it also carries a 4-byte sequence number.
 
 Bluetooth SPP staging uses printable `FW` / `DATA` / `VERIFY` commands. Each Base64 `DATA` block includes its decoded offset and receives an ACK carrying the next expected offset, so a lost response can be retried without appending the block twice. This outer staging protocol is separate from the binary UART frame protocol between ESP32 and STM32.
+
+Web and Bluetooth transfers share a FreeRTOS mutex. The Web upload handler uses a fixed 1KB buffer and writes directly to SPIFFS, so the 54KB application image is never duplicated in ESP32 RAM.
 
 ## FreeRTOS Task Architecture
 
