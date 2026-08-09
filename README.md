@@ -2,13 +2,13 @@
 
 > STM32 Blue Pill + FreeRTOS + ESP32 | 自定义 Bootloader + OTA | 多传感器 + Web仪表盘 + MQTT上云
 
-基于 STM32F103C8T6 (Blue Pill) + FreeRTOS + ESP32 协处理器的**智能环境监测与联动控制系统**。当前已完成自定义 Bootloader、蓝牙 OTA 和手机 Web OTA；传感器→决策→执行器、实时仪表盘与 MQTT 属于后续扩展目标。
+基于 STM32F103C8T6 (Blue Pill) + FreeRTOS + ESP32 协处理器的**智能环境监测与联动控制系统**。当前已完成自定义 Bootloader、蓝牙 OTA、手机 Web OTA，以及 STM32 本地环境终端；传感器→决策→执行器、远程实时仪表盘与 MQTT 属于后续扩展目标。
 
 > 想快速回顾每次提交到底改了什么，可看双语 [CHANGELOG.md](CHANGELOG.md)。它会区分“已经实机验证”和“仍是设计/待验证”的内容。
 
 ## 项目定位
 
-嵌入式 MCU / RTOS 方向简历项目。当前核心覆盖 ARM Cortex-M3 裸机 Bootloader、FreeRTOS 多任务、ESP32 双模无线网关、自定义 UART 协议，以及 Web/蓝牙/Python 三条 OTA 入口。
+嵌入式 MCU / RTOS 方向简历项目。当前核心覆盖 ARM Cortex-M3 裸机 Bootloader、FreeRTOS 多任务、ESP32 双模无线网关、自定义 UART 协议、Web/蓝牙/Python 三条 OTA 入口，以及 I2C 多设备采集和旋钮式本地 OLED 菜单。
 
 > 下方系统图、传感器和执行器清单包含项目目标架构；是否已经实现以“硬件 OTA 闭环验证”和 [CHANGELOG.md](CHANGELOG.md) 为准。
 
@@ -37,9 +37,12 @@
 
 ### STM32 (C, FreeRTOS)
 - **Bootloader**: 8KB 裸机，Flash 分区管理，`.ramfunc` RAM 执行，CRC-32 校验，OTA 状态机
-- **FreeRTOS**: 当前 5 任务架构（Comm/Control/App/Monitor/Led）；传感器任务后续扩展
-- **规划外设协议**:
-  - I2C×2 双总线（6 设备，Mutex 保护）
+- **FreeRTOS**: 当前 5 任务架构（Comm/Control/App/Monitor/Led）；`AppTask` 已整合本地传感器采集、PIR 状态和 OLED 菜单
+- **当前外设**:
+  - I2C1 100kHz 多设备总线：SSD1306、BH1750、AHT20、BMP280
+  - GPIO/EXTI：EC11 四状态解码、独立确认按键、HC-SR501 输入
+- **后续规划协议**:
+  - I2C2（MPU6050、VL53L0X）
   - UART（双串口：ESP32 协议 + 调试日志）
   - 1-Wire（DHT11 bit-banging）
   - Timer Encoder Mode（旋转编码器硬件正交解码）
@@ -61,22 +64,20 @@
 - **蓝牙终端**: Windows/Android Classic SPP 文本命令（iPhone 不支持 SPP）
 - **Python 桌面**: `ota_sender.py` 固件上传 + `control_panel.py` 控制面板
 
-## 规划传感器清单
+## 传感器进度
 
-| 模块 | 协议 | 功能 | I2C 地址 |
-|------|------|------|----------|
-| AHT20 | I2C1 | 温湿度 | 0x38 |
-| BMP280 | I2C2 | 气压 | 0x76 |
-| BH1750 | I2C1 | 光照度 | 0x23 |
-| MPU6050 | I2C2 | 6轴姿态 | 0x68 |
-| VL53L0X | I2C2 | 激光测距 | 0x29 |
-| SSD1306 OLED | I2C1 | 数据显示 | 0x3C |
-| DHT11 | 1-Wire | 温湿度(冗余) | - |
-| MQ-2 | ADC | 烟雾浓度 | - |
-| HC-SR501 | GPIO INT | 人体红外 | - |
-| 对射式红外 | GPIO INT | 门窗检测 | - |
-| HC-SR04 | Timer IC | 超声波测距 | - |
-| 旋转编码器 | Timer Enc | 菜单旋钮 | - |
+| 模块 | 当前接口 | 功能 | 地址/引脚 | 状态 |
+|------|----------|------|-----------|------|
+| AHT20 + BMP280 组合板 | I2C1 | 温度、湿度、气压 | 0x38 + 0x76/0x77 | 实机通过 |
+| BH1750 | I2C1 | 光照度 | 0x23 | 实机通过 |
+| SSD1306 OLED | I2C1 | 本地菜单与数据显示 | 0x3C | 实机通过 |
+| HC-SR501 | GPIO | 人体红外 | PB0 | 实机通过 |
+| EC11 旋转编码器 | GPIO EXTI + GPIO | 菜单上下/确认 | PA6/PA7 + PA1 | 实机通过 |
+| MPU6050 | I2C2（规划） | 6轴姿态 | 0x68 | 待接入 |
+| VL53L0X | I2C2（规划） | 激光测距 | 0x29 | 待接入 |
+| DHT11 | 1-Wire（规划） | 温湿度冗余 | - | 待接入 |
+| MQ-2 | ADC（规划） | 烟雾浓度 | - | 待接入 |
+| HC-SR04 | Timer IC（规划） | 超声波测距 | - | 待接入 |
 
 ## 规划执行器清单
 
@@ -106,10 +107,12 @@ PA9 (TX)  ────────────► GPIO16 (RX)
 PA10 (RX) ◄──────────── GPIO17 (TX)
 GND       ─────────────── GND
 
-PB6/PB7  (I2C1 SCL/SDA) ─── AHT20 + BH1750 + SSD1306
-PB10/PB11 (I2C2 SCL/SDA) ─── BMP280 + MPU6050 + VL53L0X
+PB6/PB7  (I2C1 SCL/SDA) ─── AHT20+BMP280 + BH1750 + SSD1306
+PA6/PA7  (GPIO EXTI) ─────── EC11 A/B
+PA1      (GPIO IN) ───────── EC11 确认按键
+PB0      (GPIO IN) ───────── HC-SR501 PIR
+PB10/PB11 (I2C2，规划) ───── MPU6050 + VL53L0X
 PB12/PB13 (GPIO OUT) ─────── 继电器1/2
-PB1      (EXTI) ──────────── HC-SR501 PIR
 PA0      (TIM2_CH1) ──────── SG90 舵机
 PA5      (ADC) ───────────── MQ-2 烟雾 (经1k/2k分压)
 ```
@@ -233,6 +236,14 @@ bluepill-ota/
 - OTA 后再次发送 `VERSION`，STM32 返回 `FW Version: 1`。这次已经覆盖 PC→蓝牙 SPP→ESP32 SPIFFS→STM32 Bootloader→Flash/CRC→Application 回跳的完整闭环。
 - 排查中发现两份 CRC 查表各有 4 个错误常量；`123456789` 经典向量恰好没有触发。现在额外用 `0x00..0xFF` 全字节向量（期望 `0x29058C73`）做回归，避免同类问题被单一测试向量漏掉。
 - iPhone 已连接 ESP32 SoftAP 并打开内置 Web OTA 页面；手机上传 15,956 字节 Application 镜像、目标版本设为 2，升级后通过 COM6 查询返回 `FW Version: 2`。该路径不需要 PC、ST-Link 或 ESP32 USB 参与固件发送。
+
+## 本地环境终端验证（2026-08-10）
+
+- I2C1 `PB6/PB7 @ 100kHz` 同时挂载 SSD1306、BH1750 和 AHT20+BMP280 组合板，四个地址均已在实机稳定工作。
+- OLED 菜单支持旋转选择、按键确认和返回；页面包括环境、光照、人体感应、系统状态与项目信息。
+- AHT20/BMP280 已显示温度、相对湿度和气压；湿度使用定点数并显示为 `61.0% RH`，未引入软件浮点。
+- HC-SR501 支持 30 秒预热状态和 HIGH/LOW 检测；BH1750 光照值可周期刷新。
+- Application 构建占用：RAM 17,676 B（86.3%），Flash 25,200 B（38.5%）；后续扩展需优先关注 RAM 余量。
 
 ## 关键约束
 
