@@ -6,14 +6,24 @@
 
 ## Current status / 当前状态
 
-- Bluetooth SPP → ESP32 → UART → STM32 application is hardware-verified. Ten consecutive `VERSION` requests succeeded during the 2026-08-08 bring-up.
-- 蓝牙 SPP → ESP32 → UART → STM32 应用链路已经实机验证；2026-08-08 连续发送 10 次 `VERSION` 均成功返回。
-- Revision `1898386` has been built for all three targets; its new STM32 bootloader and application were flashed and verified through ST-Link. The matching ESP32 bridge firmware still needs its physical download-mode flash, then a real OTA run.
-- `1898386` 已完成三目标构建；其中新版 STM32 Bootloader 与 Application 已通过 ST-Link 烧录和校验。还差 ESP32 进入下载模式后刷写对应 Bridge 固件，并跑一次真实 OTA。
-- End-to-end OTA (stage firmware, reboot into bootloader, erase/program, CRC verification, then restart application) remains **unverified until that hardware run completes**.
-- 完整 OTA（暂存固件、切入 Bootloader、擦写、CRC 校验、重启应用）在那次硬件验收完成前仍属于**未验证**状态。
+- The full PC → Bluetooth SPP → ESP32 SPIFFS → STM32 bootloader → Flash/CRC → application path is now hardware-verified.
+- PC → 蓝牙 SPP → ESP32 SPIFFS → STM32 Bootloader → Flash/CRC → Application 的完整路径现已通过实机验证。
+- A 15,956-byte application image (`CRC32 0x3B274D7E`) completed OTA successfully, and the updated STM32 application replied `FW Version: 1` after reboot.
+- 15,956 字节的应用镜像（`CRC32 0x3B274D7E`）已完成 OTA；重启后 STM32 新应用返回 `FW Version: 1`。
+- All three firmware targets build, the protocol smoke test passes both the classic and all-byte CRC vectors, and the current hardware wiring is stable at USART1 9600 baud.
+- 三端固件均可构建；协议烟测同时覆盖经典 CRC 向量和全字节向量；当前硬件接线在 USART1 9600 baud 下稳定工作。
 
 ## Milestones / 里程碑
+
+### v0.10 — Hardware-verified end-to-end OTA / 实机验证完整 OTA 闭环
+
+**Commit:** [`646bda2`](https://github.com/finnyoun9/bluepill-ota-bootloader/commit/646bda2)
+
+- 中文：把 PC→ESP32 暂存改成文本安全的 Base64 分块协议：`FW` 声明元数据，`DATA <offset>,<base64>` 逐块发送并等待偏移量 ACK，`VERIFY` 做暂存前检，最后 `SEND` 触发 STM32 OTA。丢 ACK 时允许同一块安全重试，SPIFFS 文件保持单次打开，减少重复打开/追加带来的不确定性。
+- English: Reworked PC-to-ESP32 staging into a text-safe Base64 block protocol: `FW` declares metadata, `DATA <offset>,<base64>` sends acknowledged blocks, `VERIFY` performs the staging preflight, and `SEND` starts STM32 OTA. Lost ACKs can be retried safely, and SPIFFS remains open for the entire staging write.
+- 中文：定位并修正 `shared/protocol.c` 与 ESP32 镜像里 4 个错误的 CRC-32 查表常量。经典 `123456789` 测试会漏掉该错误，因此新增 `0x00..0xFF` 全字节回归向量，期望值为 `0x29058C73`。
+- English: Corrected four bad CRC-32 table constants in both protocol implementations. The classic `123456789` vector did not exercise those entries, so an `0x00..0xFF` regression vector with expected CRC `0x29058C73` was added.
+- 验证 / Validation: 15,956-byte app image, CRC `0x3B274D7E`; ESP32 reported `STATUS: OTA complete!`; after reboot, `VERSION` returned `FW Version: 1`. / A 15,956-byte image with CRC `0x3B274D7E` completed OTA, and the rebooted STM32 reported firmware version 1.
 
 ### v0.9 — Deterministic full-OTA pipeline / 可确定时序的完整 OTA 链路
 

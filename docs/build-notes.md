@@ -1,14 +1,14 @@
 # Build Notes — 2026-08-09
 
-> 三端固件均能通过 PlatformIO 构建，且 Bluetooth SPP→ESP32→STM32 的 `VERSION` 往返已通过实机验证。完整 OTA 镜像传输仍未验收。
+> 三端固件均能通过 PlatformIO 构建，Bluetooth SPP→ESP32→STM32 的完整 OTA 已通过实机闭环验证，升级后返回 `FW Version: 1`。
 
 ## 三端编译结果
 
 | 固件 | 工具链 | RAM | Flash | 产物 |
 |------|--------|-----|-------|------|
-| Bootloader | `pio run -e bluepill` | 11.0% (2252B) | 10.9% (7128B) | `.pio/build/bluepill/firmware.bin` |
-| Application | `pio run -e app` | 85.0% (17408B) | 23.8% (15588B) | `.pio/build/app/firmware.bin` |
-| ESP32 Bridge | `pio run -d esp32-comm-bridge` | 19.7% (64448B) | 69.0% (1266293B / 1835008B) | `esp32-comm-bridge/.pio/build/esp32dev/firmware.bin` |
+| Bootloader | `pio run -e bluepill` | 11.0% (2260B) | 10.7% (7032B) | `.pio/build/bluepill/firmware.bin` |
+| Application | `pio run -e app` | 85.0% (17408B) | 23.8% (15604B) | `.pio/build/app/firmware.bin` |
+| ESP32 Bridge | `pio run -d esp32-comm-bridge` | 19.7% (64456B) | 69.3% (1271101B / 1835008B) | `esp32-comm-bridge/.pio/build/esp32dev/firmware.bin` |
 
 - Bootloader 产物 ~6KB，满足 **8KB 硬约束**
 - Application 仍在 54KB 应用区内；RAM 余量约 3KB，后续增加传感器任务时需持续关注
@@ -19,6 +19,8 @@
 - ESP32 CH340 串口为 `COM4`，STM32 通过 ST-Link SWD 烧录；两端写后校验均已通过。
 - 链路接线：`GPIO17 → PA10`、`GPIO16 ← PA9`、GND 直连；STM32 使用 USART1，双方暂定 9600 baud。
 - Windows Bluetooth Classic SPP 建立后，`COM6` 可发送 `STATUS` 与 `VERSION`；连续 10 次 `VERSION` 均返回 `FW Version: 0`。
+- 使用 `tools/bridge_ota.py COM6 .pio/build/app/firmware.bin --version 1` 推送 15,956 字节镜像（CRC-32 `0x3B274D7E`），ESP32 返回 `STATUS: OTA complete!`。
+- OTA 完成并重启后，`VERSION` 返回 `FW Version: 1`，证明暂存、Bootloader 切换、Flash 擦写、CRC 校验和应用回跳均已跑通。
 
 ## Application 编译要点
 
@@ -85,20 +87,27 @@ pio run -d esp32-comm-bridge
 
 ## 蓝牙协议（实现现状）
 
-服务名 `STM32-OTA-Bridge`。命令：`STATUS` / `VERSION` / `OTA <url>` / `FW <ver>,<size>,<crc32>` / `SEND` / `WIFI <ssid>,<pass>` / `RESET`。
+服务名 `STM32-OTA-Bridge`。命令：`STATUS` / `VERSION` / `OTA <url>` / `FW <ver>,<size>,<crc32>` / `DATA <offset>,<base64>` / `VERIFY` / `SEND` / `WIFI <ssid>,<pass>` / `RESET`。
 
-蓝牙推固件的正确流程（`FW` + 二进制 + `SEND`）：
+蓝牙推固件的正确流程（`FW` + Base64 `DATA` + `VERIFY` + `SEND`）：
 1. PC 发 `FW <version>,<size>,<crc32hex>` —— 声明精确大小、版本和标准 IEEE CRC-32，ESP32 清空旧暂存区
-2. 发恰好 `<size>` 字节的二进制固件数据（SPP 逐块推）
-3. 等 ESP32 返回 `FW: staged ...`；这说明文件长度完整，随后发 `SEND`
-4. ESP32 复算 SPIFFS 文件 CRC，向应用发 `CMD_OTA_AVAILABLE`，等待应用以 `CMD_OTA_READY` 确认配置页已写好，再开始 Bootloader OTA
+2. PC 把固件拆成不超过 128 字节的块，发送 `DATA <offset>,<base64>`；每块等待 `DATA: ACK <next_offset>`，超时可安全重发
+3. 全部分块完成后发送 `VERIFY`；ESP32 同时检查接收过程 CRC 和 SPIFFS 文件回读 CRC
+4. 等 ESP32 返回 `FW: staged ...` 后发送 `SEND`
+5. ESP32 向应用发 `CMD_OTA_AVAILABLE`，等待 `CMD_OTA_READY` 确认配置页已写好，再开始 Bootloader OTA
 
-> 注意：SPP 回调里必须显式携带字节长度，固件 bin 含 NUL 字节，`strlen` 会截断。
+> 早期直接传二进制的方案受 SPP 字节流分包和终端路径影响，现改用可打印 Base64 分块。`tools/bridge_ota.py` 会自动完成编码、ACK 重试、`VERIFY` 和 `SEND`。
 
-> 当前已实测文本命令的 `STATUS` / `VERSION`。完整 OTA 已具备可执行脚本 `tools/bridge_ota.py`，仍需在刷写本轮三端固件后做一次实机验收。
+### 7. CRC 回归测试不能只用经典向量
+
+`shared/protocol.c` 和 ESP32 的 `protocol.cpp` 曾各有 4 个 CRC 查表常量抄错，但 `123456789 → 0xCBF43926` 仍然通过，因为该输入没有访问错误表项。现已：
+
+- 修正两份表中的 4 个常量，并用脚本核对 256/256 表项
+- 在 `tools/protocol_smoke_test.c` 增加 `0x00..0xFF → 0x29058C73` 全字节向量
+- 用真实 15,956 字节固件的 `0x3B274D7E` 完成 ESP32 暂存和 STM32 Bootloader 双端 CRC 验证
 
 ## 下一步
 
 - [x] 实机烧录 Bootloader / Application / ESP32，并验证 Bluetooth SPP 到 STM32 的双向命令链路
-- [ ] 用一份已构建的 `app/firmware.bin` 验证端到端 OTA（暂存、触发重启、分块、CRC、回跳）
-- [ ] 按 `project-framework.md` 的 Phase 0-7 上传感器驱动层（简历项目目标）
+- [x] 用已构建的 `app/firmware.bin` 验证端到端 OTA（暂存、触发重启、分块、CRC、回跳）
+- [ ] 按 `project-framework.md` 的 Phase 0-7 完成传感器驱动层（简历项目目标）
