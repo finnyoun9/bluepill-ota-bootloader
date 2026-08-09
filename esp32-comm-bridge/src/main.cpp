@@ -12,7 +12,9 @@
  *
  * Text commands over BT SPP:
  *   OTA <url>          Download firmware from URL, then transfer to STM32
- *   FW <ver>,<size>,<crc32>  Begin a length-prefixed Bluetooth firmware push
+ *   FW <ver>,<size>,<crc32>  Begin a Base64 Bluetooth firmware push
+ *   DATA <offset>,<base64>   Append one acknowledged firmware block
+ *   VERIFY             Verify the staged image size and CRC-32
  *   SEND               Transfer the staged firmware to STM32
  *   WIFI <ssid>,<pass> Configure WiFi credentials (NVS) and reconnect
  *   VERSION            Query STM32 firmware version
@@ -46,6 +48,7 @@
 
 #include "esp_wifi.h"
 #include "esp_http_client.h"
+#include "mbedtls/base64.h"
 
 /*---------------------------------------------------------------------------
  * Shared protocol (C-compatible, included as extern "C")
@@ -113,6 +116,8 @@ static uint32_t        g_fw_size = 0;
 static uint32_t        g_fw_expected_size = 0;
 static uint32_t        g_fw_version = 0;
 static uint32_t        g_fw_crc32 = 0;
+static uint32_t        g_fw_running_crc = 0;
+static FILE           *g_fw_file = NULL;
 
 /* Bluetooth SPP is a byte stream, so a terminal command can arrive in
  * several ESP_SPP_DATA_IND_EVT callbacks. Accumulate it through CR/LF. */
@@ -236,15 +241,20 @@ static void spiffs_init(void) {
  *---------------------------------------------------------------------------*/
 
 static void discard_incoming_firmware(void) {
+    if (g_fw_file != NULL) {
+        fclose(g_fw_file);
+        g_fw_file = NULL;
+    }
     g_fw_staged = false;
     g_fw_receiving = false;
     g_fw_size = 0;
     g_fw_expected_size = 0;
+    g_fw_running_crc = 0;
     unlink(FW_FILE_PATH);
 }
 
 static bool stage_firmware_data(const uint8_t *data, size_t len) {
-    if (!g_fw_receiving || g_fw_expected_size == 0 ||
+    if (!g_fw_receiving || g_fw_file == NULL || g_fw_expected_size == 0 ||
         g_fw_size > g_fw_expected_size ||
         len > (size_t)(g_fw_expected_size - g_fw_size)) {
         ESP_LOGE(TAG, "Invalid firmware chunk: received=%u staged=%lu expected=%lu",
@@ -253,15 +263,7 @@ static bool stage_firmware_data(const uint8_t *data, size_t len) {
         return false;
     }
 
-    FILE *f = fopen(FW_FILE_PATH, "ab");
-    if (!f) {
-        ESP_LOGE(TAG, "Cannot open staged firmware for append");
-        discard_incoming_firmware();
-        return false;
-    }
-
-    size_t written = fwrite(data, 1, len, f);
-    fclose(f);
+    size_t written = fwrite(data, 1, len, g_fw_file);
     if (written != len) {
         ESP_LOGE(TAG, "SPIFFS write short: expected=%u got=%u",
                  (unsigned)len, (unsigned)written);
@@ -269,21 +271,23 @@ static bool stage_firmware_data(const uint8_t *data, size_t len) {
         return false;
     }
 
+    g_fw_running_crc = proto_crc32(data, len, g_fw_running_crc);
     g_fw_size += (uint32_t)len;
     if (g_fw_size == g_fw_expected_size) {
+        if (fclose(g_fw_file) != 0) {
+            g_fw_file = NULL;
+            ESP_LOGE(TAG, "Failed to close staged firmware file");
+            discard_incoming_firmware();
+            return false;
+        }
+        g_fw_file = NULL;
         g_fw_receiving = false;
-        g_fw_staged = true;
-
-        char msg[96];
-        snprintf(msg, sizeof(msg), "FW: staged %lu bytes; send SEND to start OTA\r\n",
-                 g_fw_size);
-        bt_spp_print(msg);
     }
     return true;
 }
 
 static bool verify_staged_firmware(void) {
-    if (!g_fw_staged || g_fw_receiving || g_fw_size == 0 ||
+    if (g_fw_receiving || g_fw_size == 0 ||
         g_fw_size != g_fw_expected_size) {
         ESP_LOGE(TAG, "Firmware stage is incomplete");
         return false;
@@ -439,16 +443,6 @@ static void bt_recv_task(void *pv) {
             uint8_t *data = item.data;
             size_t   len  = item.len;
 
-            /* FW declares an exact byte count. Until that count is reached,
-             * every byte is firmware — even if a chunk happens to start with
-             * an ASCII letter. The sender waits for the staged confirmation
-             * before it sends the subsequent SEND command. */
-            if (g_fw_receiving) {
-                stage_firmware_data(data, len);
-                free(data);
-                continue;
-            }
-
             /* Reassemble a terminal command. SPP does not preserve the
              * write boundaries of the PC serial terminal. */
             if (g_cmd_len > 0 ||
@@ -495,7 +489,9 @@ static void bt_recv_task(void *pv) {
                 memcpy(cmd, data, n);
                 cmd[n] = '\0';
 
-                ESP_LOGI(TAG, "BT cmd: %s", cmd);
+                if (strncmp(cmd, "DATA ", 5) != 0 && strncmp(cmd, "data ", 5) != 0) {
+                    ESP_LOGI(TAG, "BT cmd: %s", cmd);
+                }
 
                 if (strncmp(cmd, "OTA ", 4) == 0 || strncmp(cmd, "ota ", 4) == 0) {
                     /* Extract URL (http:// or https://) */
@@ -516,8 +512,9 @@ static void bt_recv_task(void *pv) {
                     }
 
                 } else if (strncmp(cmd, "FW ", 3) == 0 || strncmp(cmd, "fw ", 3) == 0) {
-                    /* Begin a Bluetooth firmware push. The declared length
-                     * makes the following binary stream unambiguous. */
+                    /* Begin a Bluetooth firmware push. DATA carries Base64
+                     * so each printable block can be offset-acknowledged and
+                     * retried independently before final CRC verification. */
                     unsigned long ver = 0, size = 0, crc = 0;
                     if (sscanf(cmd + 3, "%lu,%lu,%lx", &ver, &size, &crc) == 3 &&
                         size > 0 && size <= FW_FILE_MAX_SIZE) {
@@ -525,15 +522,88 @@ static void bt_recv_task(void *pv) {
                         g_fw_version = (uint32_t)ver;
                         g_fw_expected_size = (uint32_t)size;
                         g_fw_crc32   = (uint32_t)crc;
-                        g_fw_receiving = true;
+                        g_fw_running_crc = 0;
+                        g_fw_file = fopen(FW_FILE_PATH, "wb");
+                        if (g_fw_file != NULL) {
+                            g_fw_receiving = true;
 
-                        char msg[96];
-                        snprintf(msg, sizeof(msg),
-                                 "FW: ready for %lu bytes, send binary data\r\n",
-                                 g_fw_expected_size);
-                        bt_spp_print(msg);
+                            char msg[96];
+                            snprintf(msg, sizeof(msg),
+                                     "FW: ready for %lu bytes, send DATA blocks\r\n",
+                                     g_fw_expected_size);
+                            bt_spp_print(msg);
+                        } else {
+                            ESP_LOGE(TAG, "Cannot open staged firmware for writing");
+                            discard_incoming_firmware();
+                            bt_spp_print("FW: storage open failed\r\n");
+                        }
                     } else {
                         bt_spp_print("FW: usage FW <version>,<size>,<crc32-hex>; max 55296 bytes\r\n");
+                    }
+
+                } else if (strncmp(cmd, "DATA ", 5) == 0 || strncmp(cmd, "data ", 5) == 0) {
+                    char *offset_text = cmd + 5;
+                    char *comma = strchr(offset_text, ',');
+                    bool accepted = false;
+
+                    if (comma != NULL && g_fw_expected_size > 0 && !g_fw_staged) {
+                        *comma = '\0';
+                        char *end = NULL;
+                        unsigned long offset = strtoul(offset_text, &end, 10);
+                        const char *encoded = comma + 1;
+                        uint8_t decoded[192];
+                        size_t decoded_len = 0;
+
+                        int rc = mbedtls_base64_decode(
+                            decoded, sizeof(decoded), &decoded_len,
+                            (const unsigned char *)encoded, strlen(encoded));
+
+                        if (end != offset_text && *end == '\0' && rc == 0 &&
+                            decoded_len > 0 &&
+                            offset <= g_fw_expected_size &&
+                            decoded_len <= g_fw_expected_size - offset) {
+                            if (offset == g_fw_size && g_fw_size < g_fw_expected_size) {
+                                accepted = stage_firmware_data(decoded, decoded_len);
+                            } else if (offset + decoded_len == g_fw_size) {
+                                /* The previous ACK may have been lost. Do not
+                                 * append the same block twice; ACK it again. */
+                                accepted = true;
+                            }
+                        }
+                    }
+
+                    if (accepted) {
+                        char msg[48];
+                        snprintf(msg, sizeof(msg), "DATA: ACK %lu\r\n", g_fw_size);
+                        bt_spp_print(msg);
+                    } else {
+                        char msg[64];
+                        snprintf(msg, sizeof(msg), "DATA: NAK expected offset %lu\r\n",
+                                 g_fw_size);
+                        bt_spp_print(msg);
+                    }
+
+                } else if (strncmp(cmd, "VERIFY", 6) == 0 || strncmp(cmd, "verify", 6) == 0) {
+                    if (!g_fw_receiving && g_fw_size == g_fw_expected_size) {
+                        g_fw_staged = true;
+                        if (g_fw_running_crc != g_fw_crc32) {
+                            ESP_LOGE(TAG,
+                                     "Firmware receive CRC failed: crc=0x%08lX/0x%08lX",
+                                     g_fw_running_crc, g_fw_crc32);
+                            g_fw_staged = false;
+                            bt_spp_print("FW: CRC mismatch; restart with FW\r\n");
+                        } else if (verify_staged_firmware()) {
+                            char msg[96];
+                            snprintf(msg, sizeof(msg),
+                                     "FW: staged %lu bytes; send SEND to start OTA\r\n",
+                                     g_fw_size);
+                            bt_spp_print(msg);
+                        } else {
+                            g_fw_staged = false;
+                            bt_spp_print("FW: CRC mismatch; restart with FW\r\n");
+                        }
+                    } else {
+                        bt_spp_print("FW: incomplete; continue DATA blocks\r\n");
                     }
 
                 } else if (strncmp(cmd, "SEND", 4) == 0 || strncmp(cmd, "send", 4) == 0) {
@@ -546,7 +616,7 @@ static void bt_recv_task(void *pv) {
                             bt_spp_print("STATUS: Transfer failed\r\n");
                         }
                     } else {
-                        bt_spp_print("STATUS: No verified firmware staged (use FW <ver>,<size>,<crc> then binary)\r\n");
+                        bt_spp_print("STATUS: No verified firmware staged (use FW, DATA, VERIFY)\r\n");
                     }
 
                 } else if (strncmp(cmd, "WIFI ", 5) == 0 || strncmp(cmd, "wifi ", 5) == 0) {
@@ -608,10 +678,10 @@ static void bt_recv_task(void *pv) {
                     esp_restart();
 
                 } else {
-                    bt_spp_print("Unknown command. Commands: OTA <url>, FW <ver>,<size>,<crc>, SEND, WIFI <ssid>,<pass>, VERSION, STATUS, RESET\r\n");
+                    bt_spp_print("Unknown command. Commands: OTA <url>, FW <ver>,<size>,<crc>, DATA <offset>,<base64>, VERIFY, SEND, WIFI <ssid>,<pass>, VERSION, STATUS, RESET\r\n");
                 }
             } else {
-                bt_spp_print("FW: binary data rejected; start with FW <ver>,<size>,<crc>\r\n");
+                bt_spp_print("FW: non-text data rejected; use Base64 DATA blocks\r\n");
             }
 
             free(data);

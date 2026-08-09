@@ -13,6 +13,7 @@ Release/
 *.bin
 *.map
 *.list
+*.exe
 
 # IDE
 .vscode/

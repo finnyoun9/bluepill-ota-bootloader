@@ -14,6 +14,12 @@ int main(void) {
     static const uint8_t crc_vector[] = "123456789";
     assert(proto_crc32_buf(crc_vector, sizeof(crc_vector) - 1) == 0xCBF43926U);
 
+    uint8_t all_bytes[256];
+    for (uint16_t i = 0; i < sizeof(all_bytes); ++i) {
+        all_bytes[i] = (uint8_t)i;
+    }
+    assert(proto_crc32_buf(all_bytes, sizeof(all_bytes)) == 0x29058C73U);
+
     uint8_t payload[PROTO_MAX_PAYLOAD];
     for (uint16_t i = 0; i < sizeof(payload); ++i) {
         payload[i] = (uint8_t)i;

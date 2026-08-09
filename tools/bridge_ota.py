@@ -5,15 +5,18 @@ The command talks to the ESP32's outgoing Bluetooth virtual COM port (normally
 COM6 on this bench), stages an application binary in ESP32 SPIFFS, and asks
 the bridge to perform the UART OTA transfer to the STM32 bootloader.
 
-The bridge protocol is deliberately length-prefixed:
+The bridge protocol is deliberately text-safe and acknowledged:
     FW <version>,<size>,<crc32>\r\n
-The script waits for the bridge's ``FW: staged`` reply before sending ``SEND``.
-That prevents arbitrary firmware bytes from ever being interpreted as text.
+    DATA <offset>,<base64>\r\n
+    VERIFY\r\n
+Base64 plus an offset ACK for every block makes staging deterministic and
+retryable before ``SEND`` starts the STM32 transfer.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import pathlib
 import sys
 import time
@@ -29,7 +32,8 @@ except ImportError:
 MAX_APP_SIZE = 54 * 1024
 
 
-def wait_for_text(ser: serial.Serial, expected: str, timeout_s: float) -> bool:
+def wait_for_text(ser: serial.Serial, expected: str, timeout_s: float,
+                  echo: bool = True) -> bool:
     """Print bridge output and return once ``expected`` appears."""
     deadline = time.monotonic() + timeout_s
     received = ""
@@ -40,13 +44,16 @@ def wait_for_text(ser: serial.Serial, expected: str, timeout_s: float) -> bool:
             continue
 
         text = data.decode("utf-8", errors="replace")
-        sys.stdout.write(text)
-        sys.stdout.flush()
+        if echo:
+            sys.stdout.write(text)
+            sys.stdout.flush()
         received = (received + text)[-4096:]
 
         if expected in received:
             return True
-        if "STATUS: Transfer failed" in received or "FW: binary data rejected" in received:
+        if ("STATUS: Transfer failed" in received or
+                "FW: CRC mismatch" in received or
+                "DATA: NAK" in received):
             return False
 
     return False
@@ -61,20 +68,24 @@ def main() -> int:
                         help="Firmware version written to STM32 config (default: 1)")
     parser.add_argument("--baud", type=int, default=115200,
                         help="Windows Bluetooth virtual-port speed (default: 115200)")
-    parser.add_argument("--chunk-size", type=int, default=256,
-                        help="PC-to-ESP32 staging write size in bytes (default: 256)")
-    parser.add_argument("--pace-ms", type=float, default=8.0,
-                        help="Delay between staging writes in ms (default: 8)")
+    parser.add_argument("--chunk-size", type=int, default=128,
+                        help="decoded bytes per Base64 DATA command (default: 128, max: 128)")
+    parser.add_argument("--pace-ms", type=float, default=0.0,
+                        help="optional delay after each acknowledged DATA block")
+    parser.add_argument("--retries", type=int, default=3,
+                        help="maximum attempts per DATA block (default: 3)")
     parser.add_argument("--timeout", type=float, default=90.0,
                         help="Maximum time for STM32 transfer and verification in seconds")
     args = parser.parse_args()
 
     if args.version < 1 or args.version > 0xFFFFFFFF:
         parser.error("--version must be in 1..4294967295")
-    if args.chunk_size < 1 or args.chunk_size > 1024:
-        parser.error("--chunk-size must be in 1..1024")
+    if args.chunk_size < 1 or args.chunk_size > 128:
+        parser.error("--chunk-size must be in 1..128")
     if args.pace_ms < 0:
         parser.error("--pace-ms must be non-negative")
+    if args.retries < 1:
+        parser.error("--retries must be at least 1")
     if not args.firmware.is_file():
         parser.error(f"firmware file not found: {args.firmware}")
 
@@ -107,13 +118,35 @@ def main() -> int:
             print("\nERROR: ESP32 did not accept the FW command.")
             return 1
 
-        print("Sending firmware to ESP32 SPIFFS...")
+        print("Sending Base64 firmware blocks to ESP32 SPIFFS...")
         delay_s = args.pace_ms / 1000.0
         for offset in range(0, len(firmware), args.chunk_size):
-            ser.write(firmware[offset:offset + args.chunk_size])
-            ser.flush()
+            chunk = firmware[offset:offset + args.chunk_size]
+            encoded = base64.b64encode(chunk)
+            command = f"DATA {offset},".encode("ascii") + encoded + b"\r\n"
+            expected = f"DATA: ACK {offset + len(chunk)}"
+
+            acknowledged = False
+            for attempt in range(1, args.retries + 1):
+                if ser.write(command) != len(command):
+                    continue
+                ser.flush()
+                if wait_for_text(ser, expected, timeout_s=5, echo=False):
+                    acknowledged = True
+                    break
+                print(f"\nRetrying DATA offset {offset} ({attempt}/{args.retries})...")
+
+            if not acknowledged:
+                print(f"\nERROR: ESP32 did not acknowledge DATA offset {offset}.")
+                return 1
+            completed = offset + len(chunk)
+            if completed % 1024 == 0 or completed == len(firmware):
+                print(f"  Staged {completed} / {len(firmware)} bytes")
             if delay_s:
                 time.sleep(delay_s)
+
+        ser.write(b"VERIFY\r\n")
+        ser.flush()
         print("Waiting for staging CRC preflight...")
         if not wait_for_text(ser, "FW: staged", timeout_s=15):
             print("\nERROR: ESP32 did not finish staging the firmware.")
