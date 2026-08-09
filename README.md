@@ -161,13 +161,15 @@ C:\Users\yyfxy\AppData\Local\Programs\Python\Python311\python.exe `
 | `VERSION` | 查询 STM32 当前固件版本 |
 | `OTA <url>` | 从 URL 下载固件并触发 OTA（版本从文件名 `fw_v<N>.bin` 解析） |
 | `FW <ver>,<size>,<crc32>` | 开始蓝牙推送固件；声明精确长度、版本和标准 CRC-32 |
+| `DATA <offset>,<base64>` | 写入一块 Base64 固件数据；ESP32 用下一偏移量 ACK（通常由脚本自动发送） |
+| `VERIFY` | 校验暂存文件长度和 CRC-32（通常由脚本自动发送） |
 | `SEND` | 在桥返回 `FW: staged` 后，把已校验的暂存固件传输到 STM32 |
 | `WIFI <ssid>,<pass>` | 配置 WiFi 并重连（存 NVS，重启后仍生效） |
 | `RESET` | 软件复位 ESP32 |
 
 > 传感器查询/控制类命令（TEMP/RELAY1/SERVO/AUTO 等）属于 docs 规划的 Phase 扩展，当前固件未实现。
 
-> `tools/bridge_ota.py` 会自动计算 `<size>` 和 CRC、等待 ESP32 暂存完成，再发送 `SEND`。不要在普通串口终端里手工粘贴二进制 `.bin`。
+> `tools/bridge_ota.py` 会自动计算 `<size>` 和 CRC，把固件编码为带偏移量 ACK 的 Base64 分块，执行 `VERIFY` 后再发送 `SEND`。不要在普通串口终端里手工粘贴二进制 `.bin`。
 
 ## 目录结构
 
@@ -209,12 +211,14 @@ bluepill-ota/
 - **国内网络编译 ESP32 需代理**：`$env:HTTPS_PROXY='http://127.0.0.1:7897'; pio run -d esp32-comm-bridge`
 - Application 使用 8MHz HSE→PLL×8 的 64MHz 时钟；当前 STM32↔ESP32 链路统一为 9600 baud
 
-## 硬件链路验证（2026-08-09）
+## 硬件 OTA 闭环验证（2026-08-09）
 
 - ESP32（CH340，COM4）和 STM32（ST-Link SWD）均已完成烧录并通过写后校验。
 - 物理 UART：`ESP32 GPIO17 → PA10`、`ESP32 GPIO16 ← PA9`、两板 GND 直连；使用 USART1，9600 baud。
-- Windows 已通过 Bluetooth Classic SPP 连接 `STM32-OTA-Bridge`；`STATUS` 正常，`VERSION` 返回 STM32 的 `FW Version: 0`。
-- 连续发送 10 次 `VERSION`，10/10 成功。此结论覆盖蓝牙→ESP32→UART→STM32 应用→回包，不等同于完整固件 OTA 已验证。
+- Windows 已通过 Bluetooth Classic SPP 的 COM6 连接 `STM32-OTA-Bridge`；基础链路连续发送 10 次 `VERSION`，10/10 成功。
+- 使用 `tools/bridge_ota.py` 暂存并发送 15,956 字节 Application 镜像，CRC-32 为 `0x3B274D7E`；ESP32 返回 `STATUS: OTA complete!`。
+- OTA 后再次发送 `VERSION`，STM32 返回 `FW Version: 1`。这次已经覆盖 PC→蓝牙 SPP→ESP32 SPIFFS→STM32 Bootloader→Flash/CRC→Application 回跳的完整闭环。
+- 排查中发现两份 CRC 查表各有 4 个错误常量；`123456789` 经典向量恰好没有触发。现在额外用 `0x00..0xFF` 全字节向量（期望 `0x29058C73`）做回归，避免同类问题被单一测试向量漏掉。
 
 ## 关键约束
 

@@ -58,7 +58,7 @@
 
 ## OTA Update Flow
 
-1. **Firmware staging** — ESP32 downloads firmware via WiFi or receives via Bluetooth, stores in SPIFFS
+1. **Firmware staging** — ESP32 downloads firmware via WiFi, or receives acknowledged Base64 `DATA` blocks via Bluetooth, then verifies and stores the image in SPIFFS
 2. **Trigger** — ESP32 sends `CMD_OTA_AVAILABLE` to STM32 application
 3. **Ready** — STM32 app writes `BOOT_MODE_OTA` to config, returns `CMD_OTA_READY`
 4. **Reboot** — Application calls `NVIC_SystemReset()`; bootloader detects the flag and opens a 2 s OTA window
@@ -67,7 +67,7 @@
 7. **Verify** — ESP32 sends `CMD_OTA_END`, bootloader computes standard CRC-32 over full image
 8. **Commit** — CRC match: write config, jump to new application
 
-> 硬件 bring-up 已验证 Bluetooth SPP 到 STM32 应用的 `VERSION` 往返（10/10）。完整固件传输、CRC 校验和回跳仍需单独验收。
+> 2026-08-09 已完成实机闭环：15,956 字节镜像通过 Bluetooth SPP 暂存，STM32 Bootloader 完成擦写与 CRC 校验，回跳后的 Application 返回 `FW Version: 1`。
 
 ## Key Design Decisions
 
@@ -84,6 +84,8 @@ STM32F103 has a single flash bank — code executing from flash stalls during er
 
 ### 4. Protocol Design
 Simple length-prefixed frames with standard IEEE CRC-32. Chunk data is at most 1KB (one flash page) for direct mapping: `addr = APP_BASE + seq * 1024`; an OTA chunk payload is 1028 bytes because it also carries a 4-byte sequence number.
+
+Bluetooth SPP staging uses printable `FW` / `DATA` / `VERIFY` commands. Each Base64 `DATA` block includes its decoded offset and receives an ACK carrying the next expected offset, so a lost response can be retried without appending the block twice. This outer staging protocol is separate from the binary UART frame protocol between ESP32 and STM32.
 
 ## FreeRTOS Task Architecture
 
