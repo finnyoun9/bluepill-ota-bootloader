@@ -31,6 +31,9 @@ sdkconfig.old
 # Local logic-analyzer captures
 uart-*.sr
 
+# EasyEDA Pro local database (contains local account metadata)
+/EnvLink-F103.eprj2
+
 # OS
 .DS_Store
 Thumbs.db
