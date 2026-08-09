@@ -29,7 +29,7 @@
 #define BOOT0_PORT              GPIOB
 #define BOOT0_PIN               GPIO_PIN_0     /* PB0 — force-bootloader jumper */
 
-#define USART_BAUD              9600U
+#define USART_BAUD              115200U
 
 /*---------------------------------------------------------------------------
  * Static data (RAM only — bootloader is single-threaded)
@@ -56,6 +56,8 @@ extern uint8_t _eramfunc;
 static void system_init(void);
 static void SystemClock_Config(void);
 static void ramfunc_init(void);
+static void iwdg_init(void);
+static void iwdg_refresh(void);
 static void uart_init(void);
 static void led_on(void);
 static void led_off(void);
@@ -133,6 +135,37 @@ static void system_init(void) {
     gpio.Mode = GPIO_MODE_INPUT;
     gpio.Pull = GPIO_PULLUP;
     HAL_GPIO_Init(BOOT0_PORT, &gpio);
+}
+
+/*---------------------------------------------------------------------------
+ * Independent watchdog (IWDG)
+ *
+ * Runs off the ~40kHz LSI, independent of SysTick and interrupts, so it
+ * still fires if the CPU gets stuck in a disabled-interrupt loop or an
+ * unhandled fault. Register-level (not HAL_IWDG_*) so it does not depend
+ * on HAL_IWDG_MODULE_ENABLED being set in stm32f1xx_hal_conf.h.
+ *
+ * IWDG keeps counting across NVIC_SystemReset() (only a power-on reset
+ * clears it), including the bootloader→application jump, so both binaries
+ * arm it with the same ~4s timeout and refresh it independently.
+ *---------------------------------------------------------------------------*/
+
+static void iwdg_init(void) {
+    IWDG->KR  = 0xCCCCU;   /* start the watchdog */
+    IWDG->KR  = 0x5555U;   /* unlock PR/RLR for writing */
+    IWDG->PR  = 4U;        /* /64 prescaler */
+    IWDG->RLR = 2499U;     /* ~4.0s @ nominal 40kHz LSI */
+
+    uint32_t guard = 100000U;
+    while ((IWDG->SR != 0U) && (--guard != 0U)) {
+        /* wait for the prescaler/reload update to latch */
+    }
+
+    IWDG->KR = 0xAAAAU;    /* load the counter from RLR */
+}
+
+static void iwdg_refresh(void) {
+    IWDG->KR = 0xAAAAU;
 }
 
 /* 8MHz HSE crystal → PLL ×8 → SYSCLK 64MHz. */
@@ -500,6 +533,7 @@ static const ProtoFrame_t *wait_for_frame(uint32_t timeout_ms) {
     uint8_t byte;
 
     while (elapsed_ms() - start < timeout_ms) {
+        iwdg_refresh();
         if (uart_read_byte_nonblock(&byte)) {
             const ProtoFrame_t *f = proto_parser_feed(&g_parser, byte);
             if (f != NULL) {
@@ -727,6 +761,7 @@ void HAL_UART_MspInit(UART_HandleTypeDef *huart) {
 int main(void) {
     ramfunc_init();
     system_init();
+    iwdg_init();
 
     uart_init();
     proto_parser_init(&g_parser);

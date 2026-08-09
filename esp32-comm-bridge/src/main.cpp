@@ -8,7 +8,7 @@
  *   - WiFi HTTP client: downloads firmware from a URL.
  *   - WiFi SoftAP + HTTP server: serves a phone-friendly firmware upload page.
  *   - UART link: communicates with STM32 bootloader/application using the
- *     shared protocol (9600 baud, framed, CRC-32).
+ *     shared protocol (115200 baud, framed, CRC-32).
  *   - Orchestrator: manages firmware staging (SPIFFS) and transfer state.
  *
  * Text commands over BT SPP:
@@ -77,7 +77,7 @@ static const char *TAG = "bridge";
 #define UART_STM32_RXD          16
 #define UART_STM32_RTS          UART_PIN_NO_CHANGE
 #define UART_STM32_CTS          UART_PIN_NO_CHANGE
-#define UART_STM32_BAUD         9600
+#define UART_STM32_BAUD         115200
 #define UART_STM32_BUF_SIZE     2048
 
 /* BT SPP */
