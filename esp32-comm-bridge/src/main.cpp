@@ -6,6 +6,7 @@
  *   - BT SPP server: accepts connections from phone apps, receives firmware
  *     files and text commands.
  *   - WiFi HTTP client: downloads firmware from a URL.
+ *   - WiFi SoftAP + HTTP server: serves a phone-friendly firmware upload page.
  *   - UART link: communicates with STM32 bootloader/application using the
  *     shared protocol (9600 baud, framed, CRC-32).
  *   - Orchestrator: manages firmware staging (SPIFFS) and transfer state.
@@ -31,10 +32,13 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "esp_system.h"
 #include "esp_log.h"
 #include "esp_spiffs.h"
 #include "esp_vfs_fat.h"
+#include "esp_event.h"
+#include "esp_netif.h"
 #include "nvs_flash.h"
 
 #include "driver/uart.h"
@@ -48,7 +52,10 @@
 
 #include "esp_wifi.h"
 #include "esp_http_client.h"
+#include "esp_http_server.h"
 #include "mbedtls/base64.h"
+
+#include "web_ota_page.h"
 
 /*---------------------------------------------------------------------------
  * Shared protocol (C-compatible, included as extern "C")
@@ -84,9 +91,23 @@ static const char *TAG = "bridge";
 /* SPIFFS firmware storage */
 #define FW_FILE_PATH            "/spiffs/fw.bin"
 #define FW_FILE_MAX_SIZE        (54 * 1024)  /* Max app size */
+#define STM32_APP_BASE          0x08002000U
+#define STM32_APP_END           0x0800F800U
+#define STM32_RAM_BASE          0x20000000U
+#define STM32_RAM_END           0x20005000U
 
 /* WiFi OTA download buffer */
 #define HTTP_DOWNLOAD_BUF_SIZE  4096
+
+/* Web OTA server */
+#define WEB_OTA_TASK_STACK      8192
+#define WEB_OTA_TASK_PRIO       5
+#ifndef WIFI_AP_SSID
+#define WIFI_AP_SSID            "STM32-OTA-Bridge"
+#endif
+#ifndef WIFI_AP_PASSWORD
+#define WIFI_AP_PASSWORD        "stm32ota"
+#endif
 
 /* WiFi credentials — override at compile time via -D WIFI_SSID/-D WIFI_PASSWORD,
  * or at runtime via the "WIFI <ssid>,<pass>" BT command (stored in NVS). */
@@ -118,6 +139,22 @@ static uint32_t        g_fw_version = 0;
 static uint32_t        g_fw_crc32 = 0;
 static uint32_t        g_fw_running_crc = 0;
 static FILE           *g_fw_file = NULL;
+static SemaphoreHandle_t g_ota_mutex = NULL;
+static volatile bool   g_ota_running = false;
+static volatile uint32_t g_ota_progress_sent = 0;
+static volatile uint32_t g_ota_progress_total = 0;
+
+typedef enum {
+    WEB_OTA_IDLE = 0,
+    WEB_OTA_UPLOADING,
+    WEB_OTA_STAGED,
+    WEB_OTA_TRANSFERRING,
+    WEB_OTA_COMPLETE,
+    WEB_OTA_FAILED
+} WebOtaState_t;
+
+static volatile WebOtaState_t g_web_ota_state = WEB_OTA_IDLE;
+static httpd_handle_t g_http_server = NULL;
 
 /* Bluetooth SPP is a byte stream, so a terminal command can arrive in
  * several ESP_SPP_DATA_IND_EVT callbacks. Accumulate it through CR/LF. */
@@ -132,12 +169,14 @@ static void uart_stm32_init(void);
 static void bt_spp_init(void);
 static void wifi_init_sta(void);
 static void wifi_connect(const char *ssid, const char *password);
+static void web_server_start(void);
 static void bt_recv_task(void *pv);
 static void bt_spp_print(const char *msg);
 static bool download_firmware_http(const char *url);
 static bool transfer_to_stm32(void);
 static bool stage_firmware_data(const uint8_t *data, size_t len);
 static bool verify_staged_firmware(void);
+static bool transfer_to_stm32_impl(void);
 
 /*---------------------------------------------------------------------------
  * UART to STM32
@@ -249,6 +288,7 @@ static void discard_incoming_firmware(void) {
     g_fw_receiving = false;
     g_fw_size = 0;
     g_fw_expected_size = 0;
+    g_fw_crc32 = 0;
     g_fw_running_crc = 0;
     unlink(FW_FILE_PATH);
 }
@@ -323,6 +363,29 @@ static bool verify_staged_firmware(void) {
     if (!read_ok || total != g_fw_size || crc != g_fw_crc32) {
         ESP_LOGE(TAG, "Firmware verification failed: size=%lu/%lu crc=0x%08lX/0x%08lX",
                  total, g_fw_size, crc, g_fw_crc32);
+        return false;
+    }
+
+    /* Reject a bootloader or unrelated binary before it reaches the STM32.
+     * A valid Cortex-M application starts with its initial stack pointer and
+     * a Thumb reset vector inside this project's application partition. */
+    f = fopen(FW_FILE_PATH, "rb");
+    if (!f) {
+        return false;
+    }
+    uint32_t initial_sp = 0;
+    uint32_t reset_vector = 0;
+    bool vector_read_ok = fread(&initial_sp, 1, sizeof(initial_sp), f) == sizeof(initial_sp) &&
+                          fread(&reset_vector, 1, sizeof(reset_vector), f) == sizeof(reset_vector);
+    fclose(f);
+
+    uint32_t reset_address = reset_vector & ~1U;
+    if (!vector_read_ok ||
+        initial_sp < STM32_RAM_BASE || initial_sp > STM32_RAM_END ||
+        (reset_vector & 1U) == 0 ||
+        reset_address < STM32_APP_BASE || reset_address >= STM32_APP_END) {
+        ESP_LOGE(TAG, "Invalid application vectors: SP=0x%08lX reset=0x%08lX",
+                 initial_sp, reset_vector);
         return false;
     }
 
@@ -690,7 +753,204 @@ static void bt_recv_task(void *pv) {
 }
 
 /*---------------------------------------------------------------------------
- * WiFi HTTP firmware download
+ * Web OTA server
+ *---------------------------------------------------------------------------*/
+
+static const char *web_ota_state_name(WebOtaState_t state) {
+    switch (state) {
+    case WEB_OTA_UPLOADING:    return "uploading";
+    case WEB_OTA_STAGED:       return "staged";
+    case WEB_OTA_TRANSFERRING: return "transferring";
+    case WEB_OTA_COMPLETE:     return "complete";
+    case WEB_OTA_FAILED:       return "failed";
+    case WEB_OTA_IDLE:
+    default:                   return "idle";
+    }
+}
+
+static esp_err_t web_send_json(httpd_req_t *req, const char *json,
+                               const char *status) {
+    if (status != NULL) {
+        httpd_resp_set_status(req, status);
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_sendstr(req, json);
+}
+
+static esp_err_t web_root_handler(httpd_req_t *req) {
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, WEB_OTA_PAGE, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t web_status_handler(httpd_req_t *req) {
+    WebOtaState_t state = g_web_ota_state;
+    char json[256];
+    snprintf(json, sizeof(json),
+             "{\"state\":\"%s\",\"staged_size\":%lu,\"version\":%lu,"
+             "\"sent\":%lu,\"total\":%lu,\"message\":\"%s\"}",
+             web_ota_state_name(state),
+             g_fw_size,
+             g_fw_version,
+             g_ota_progress_sent,
+             g_ota_progress_total,
+             state == WEB_OTA_FAILED ? "OTA transfer failed" : "");
+    return web_send_json(req, json, NULL);
+}
+
+static bool web_parse_version(httpd_req_t *req, uint32_t *version) {
+    char query[64] = {0};
+    char value[16] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "version", value, sizeof(value)) != ESP_OK) {
+        return false;
+    }
+
+    char *end = NULL;
+    unsigned long parsed = strtoul(value, &end, 10);
+    if (end == value || *end != '\0' || parsed == 0 || parsed > UINT32_MAX) {
+        return false;
+    }
+    *version = (uint32_t)parsed;
+    return true;
+}
+
+static esp_err_t web_upload_handler(httpd_req_t *req) {
+    uint32_t version = 0;
+    if (!web_parse_version(req, &version)) {
+        return web_send_json(req, "{\"message\":\"Invalid firmware version\"}",
+                             "400 Bad Request");
+    }
+    if (req->content_len <= 0 || req->content_len > FW_FILE_MAX_SIZE) {
+        return web_send_json(req, "{\"message\":\"Firmware must be 1..55296 bytes\"}",
+                             "413 Payload Too Large");
+    }
+    if (g_ota_running || g_fw_receiving ||
+        g_web_ota_state == WEB_OTA_TRANSFERRING) {
+        return web_send_json(req, "{\"message\":\"OTA bridge is busy\"}",
+                             "409 Conflict");
+    }
+
+    discard_incoming_firmware();
+    g_fw_version = version;
+    g_fw_expected_size = (uint32_t)req->content_len;
+    g_fw_running_crc = 0;
+    g_fw_file = fopen(FW_FILE_PATH, "wb");
+    if (g_fw_file == NULL) {
+        g_web_ota_state = WEB_OTA_FAILED;
+        return web_send_json(req, "{\"message\":\"Cannot open firmware storage\"}",
+                             "500 Internal Server Error");
+    }
+
+    g_fw_receiving = true;
+    g_web_ota_state = WEB_OTA_UPLOADING;
+    g_ota_progress_sent = 0;
+    g_ota_progress_total = g_fw_expected_size;
+
+    uint8_t buffer[1024];
+    int remaining = req->content_len;
+    while (remaining > 0) {
+        size_t wanted = remaining < (int)sizeof(buffer)
+                        ? (size_t)remaining : sizeof(buffer);
+        int received = httpd_req_recv(req, (char *)buffer, wanted);
+        if (received == HTTPD_SOCK_ERR_TIMEOUT) {
+            continue;
+        }
+        if (received <= 0 || !stage_firmware_data(buffer, (size_t)received)) {
+            discard_incoming_firmware();
+            g_web_ota_state = WEB_OTA_FAILED;
+            return web_send_json(req, "{\"message\":\"Firmware upload interrupted\"}",
+                                 "500 Internal Server Error");
+        }
+        remaining -= received;
+        g_ota_progress_sent = g_fw_size;
+    }
+
+    g_fw_crc32 = g_fw_running_crc;
+    g_fw_staged = true;
+    if (!verify_staged_firmware()) {
+        discard_incoming_firmware();
+        g_web_ota_state = WEB_OTA_FAILED;
+        return web_send_json(req, "{\"message\":\"Firmware verification failed\"}",
+                             "422 Unprocessable Entity");
+    }
+
+    g_web_ota_state = WEB_OTA_STAGED;
+    char json[128];
+    snprintf(json, sizeof(json),
+             "{\"message\":\"Firmware staged\",\"size\":%lu,\"crc32\":\"%08lX\"}",
+             g_fw_size, g_fw_crc32);
+    return web_send_json(req, json, NULL);
+}
+
+static void web_ota_task(void *pv) {
+    (void)pv;
+    bool success = transfer_to_stm32();
+    g_web_ota_state = success ? WEB_OTA_COMPLETE : WEB_OTA_FAILED;
+    vTaskDelete(NULL);
+}
+
+static esp_err_t web_start_handler(httpd_req_t *req) {
+    if (!g_fw_staged || g_fw_receiving) {
+        return web_send_json(req, "{\"message\":\"No verified firmware staged\"}",
+                             "409 Conflict");
+    }
+    if (g_ota_running || g_web_ota_state == WEB_OTA_TRANSFERRING) {
+        return web_send_json(req, "{\"message\":\"OTA transfer already running\"}",
+                             "409 Conflict");
+    }
+
+    g_web_ota_state = WEB_OTA_TRANSFERRING;
+    g_ota_progress_sent = 0;
+    g_ota_progress_total = g_fw_size;
+    if (xTaskCreate(web_ota_task, "web_ota", WEB_OTA_TASK_STACK, NULL,
+                    WEB_OTA_TASK_PRIO, NULL) != pdPASS) {
+        g_web_ota_state = WEB_OTA_FAILED;
+        return web_send_json(req, "{\"message\":\"Cannot start OTA task\"}",
+                             "500 Internal Server Error");
+    }
+    return web_send_json(req, "{\"message\":\"OTA started\"}", "202 Accepted");
+}
+
+static void web_server_start(void) {
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.stack_size = 6144;
+    config.max_uri_handlers = 4;
+    config.recv_wait_timeout = 10;
+
+    if (httpd_start(&g_http_server, &config) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start Web OTA server");
+        return;
+    }
+
+    const httpd_uri_t root = {
+        .uri = "/", .method = HTTP_GET,
+        .handler = web_root_handler, .user_ctx = NULL
+    };
+    const httpd_uri_t status = {
+        .uri = "/api/status", .method = HTTP_GET,
+        .handler = web_status_handler, .user_ctx = NULL
+    };
+    const httpd_uri_t upload = {
+        .uri = "/api/upload", .method = HTTP_POST,
+        .handler = web_upload_handler, .user_ctx = NULL
+    };
+    const httpd_uri_t start = {
+        .uri = "/api/start", .method = HTTP_POST,
+        .handler = web_start_handler, .user_ctx = NULL
+    };
+
+    ESP_ERROR_CHECK(httpd_register_uri_handler(g_http_server, &root));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(g_http_server, &status));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(g_http_server, &upload));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(g_http_server, &start));
+    ESP_LOGI(TAG, "Web OTA ready: connect to %s and open http://192.168.4.1",
+             WIFI_AP_SSID);
+}
+
+/*---------------------------------------------------------------------------
+ * WiFi station + SoftAP
  *---------------------------------------------------------------------------*/
 
 static void wifi_connect(const char *ssid, const char *password) {
@@ -705,9 +965,25 @@ static void wifi_connect(const char *ssid, const char *password) {
 }
 
 static void wifi_init_sta(void) {
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_ap();
+    esp_netif_create_default_wifi_sta();
+
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+
+    wifi_config_t ap_cfg = {};
+    strncpy((char *)ap_cfg.ap.ssid, WIFI_AP_SSID, sizeof(ap_cfg.ap.ssid) - 1);
+    strncpy((char *)ap_cfg.ap.password, WIFI_AP_PASSWORD,
+            sizeof(ap_cfg.ap.password) - 1);
+    ap_cfg.ap.ssid_len = strlen(WIFI_AP_SSID);
+    ap_cfg.ap.channel = 1;
+    ap_cfg.ap.max_connection = 4;
+    ap_cfg.ap.authmode = WIFI_AUTH_WPA2_PSK;
+
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
 
     /* Credentials: runtime-configured via the "WIFI" BT command (NVS),
@@ -724,7 +1000,11 @@ static void wifi_init_sta(void) {
     if (ssid[0] == '\0') strncpy(ssid, WIFI_SSID, sizeof(ssid) - 1);
     if (pass[0] == '\0') strncpy(pass, WIFI_PASSWORD, sizeof(pass) - 1);
 
-    wifi_connect(ssid, pass);
+    if (strcmp(ssid, "YOUR_SSID") != 0 && ssid[0] != '\0') {
+        wifi_connect(ssid, pass);
+    } else {
+        ESP_LOGI(TAG, "No station credentials; SoftAP remains available");
+    }
 }
 
 /*---------------------------------------------------------------------------
@@ -840,6 +1120,19 @@ static bool download_firmware_http(const char *url) {
  *---------------------------------------------------------------------------*/
 
 static bool transfer_to_stm32(void) {
+    if (g_ota_mutex == NULL || xSemaphoreTake(g_ota_mutex, 0) != pdTRUE) {
+        ESP_LOGE(TAG, "Another OTA transfer is already running");
+        return false;
+    }
+
+    g_ota_running = true;
+    bool success = transfer_to_stm32_impl();
+    g_ota_running = false;
+    xSemaphoreGive(g_ota_mutex);
+    return success;
+}
+
+static bool transfer_to_stm32_impl(void) {
     if (!g_fw_staged || g_fw_receiving) {
         ESP_LOGE(TAG, "No firmware staged for transfer");
         return false;
@@ -973,6 +1266,7 @@ static bool transfer_to_stm32(void) {
         }
 
         bytes_sent += n;
+        g_ota_progress_sent = bytes_sent;
         seq++;
 
         if (seq % 10 == 0) {
@@ -1026,6 +1320,9 @@ extern "C" void app_main(void) {
     /* Init storage */
     spiffs_init();
 
+    g_ota_mutex = xSemaphoreCreateMutex();
+    ESP_ERROR_CHECK(g_ota_mutex != NULL ? ESP_OK : ESP_ERR_NO_MEM);
+
     /* Init UART to STM32 */
     uart_stm32_init();
 
@@ -1034,6 +1331,9 @@ extern "C" void app_main(void) {
 
     /* Init WiFi (for OTA downloads) */
     wifi_init_sta();
+
+    /* Start phone-friendly Web OTA page on the SoftAP. */
+    web_server_start();
 
     /* Create BT receive task */
     xTaskCreate(bt_recv_task, "bt_recv", SPP_TASK_STACK, NULL, SPP_TASK_PRIO, NULL);
