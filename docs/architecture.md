@@ -39,7 +39,7 @@
 │  │  - FreeRTOS (5 tasks)                            │   │
 │  │  - UART protocol handler                         │   │
 │  │  - OTA trigger (write config + NVIC_SystemReset) │   │
-│  │  - User application logic                        │   │
+│  │  - Local sensor acquisition + OLED menu          │   │
 │  └──────────────────────────────────────────────────┘   │
 │                                                          │
 │  ┌──────────────────────────────────────────────────┐   │
@@ -98,9 +98,25 @@ Web and Bluetooth transfers share a FreeRTOS mutex. The Web upload handler uses 
 |------|----------|-------|------|
 | vCommTask | 3 | 768w | UART frame RX/TX, protocol parsing |
 | vControlTask | 2 | 512w | OTA trigger, version reporting |
-| vAppTask | 1 | 768w | User application logic |
+| vAppTask | 1 | 768w | Sensor scheduling, EC11 navigation, PIR state, OLED UI |
 | vLedTask | 1 | 256w | Status LED heartbeat |
 | vMonitorTask | 1 | 256w | System health, stack/heap monitoring |
+
+## Local Environment Terminal
+
+The 2026-08-10 hardware checkpoint adds a local user interface without changing the OTA protocol path:
+
+| Device | Interface | Current wiring | Role |
+|--------|-----------|----------------|------|
+| SSD1306 | I2C1, 0x3C | PB6/PB7 | Five-page 128×64 menu |
+| BH1750 | I2C1, 0x23 | PB6/PB7 | Periodic lux measurement |
+| AHT20 | I2C1, 0x38 | PB6/PB7 | Temperature and humidity with CRC-8 |
+| BMP280 | I2C1, 0x76/0x77 | PB6/PB7 | Calibrated fixed-point pressure |
+| EC11 A/B | GPIO EXTI | PA6/PA7 | Full Gray-code x1 navigation |
+| Confirm button | GPIO input | PA1 | Enter/back action |
+| HC-SR501 | GPIO input | PB0 | Motion state after 30 s warm-up |
+
+All I2C devices currently share the 100kHz I2C1 bus. `vAppTask` starts AHT20 and BMP280 conversions together, reads them after 90 ms, refreshes the environment data every 2 s, polls BH1750 every 200 ms, and only redraws the active OLED page. Sensor values stay in integer/fixed-point form because STM32F103 has no hardware FPU.
 
 ## Directory Structure
 
@@ -114,8 +130,8 @@ bluepill-ota/
 │   ├── Core/Src/main.c       # Boot state machine
 │   └── STM32F103C8TX_BOOT.ld # 0x08000000, 8KB
 ├── application/              # STM32CubeIDE application project
-│   ├── Core/Inc/             # app_tasks, uart_comm, cmd_handler
-│   ├── Core/Src/main.c       # FreeRTOS tasks
+│   ├── Core/Inc/             # Tasks, UART, I2C/sensor/input/display APIs
+│   ├── Core/Src/             # FreeRTOS tasks and local terminal drivers
 │   ├── FreeRTOSConfig.h
 │   └── STM32F103C8TX_APP.ld  # 0x08002000, 54KB
 ├── esp32-comm-bridge/        # ESP-IDF project

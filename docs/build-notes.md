@@ -1,17 +1,17 @@
-# Build Notes — 2026-08-09
+# Build Notes — 2026-08-10
 
-> 三端固件均能通过 PlatformIO 构建，Bluetooth SPP→ESP32→STM32 的完整 OTA 已通过实机闭环验证，升级后返回 `FW Version: 1`。
+> 三端固件均能通过 PlatformIO 构建；OTA 闭环和 STM32 本地环境终端均已通过实机验证。
 
 ## 三端编译结果
 
 | 固件 | 工具链 | RAM | Flash | 产物 |
 |------|--------|-----|-------|------|
 | Bootloader | `pio run -e bluepill` | 11.0% (2260B) | 10.7% (7032B) | `.pio/build/bluepill/firmware.bin` |
-| Application | `pio run -e app` | 85.0% (17408B) | 23.8% (15604B) | `.pio/build/app/firmware.bin` |
+| Application | `pio run -e app` | 86.3% (17676B) | 38.5% (25200B) | `.pio/build/app/firmware.bin` |
 | ESP32 Bridge | `pio run -d esp32-comm-bridge` | 19.9% (65152B) | 73.6% (1349653B / 1835008B) | `esp32-comm-bridge/.pio/build/esp32dev/firmware.bin` |
 
 - Bootloader 产物 ~6KB，满足 **8KB 硬约束**
-- Application 仍在 54KB 应用区内；RAM 余量约 3KB，后续增加传感器任务时需持续关注
+- Application 仍在 54KB 应用区内；RAM 仅余 2,804B，后续增加任务或大缓冲区前必须检查 heap/stack 余量
 - ESP32 开 Bluedroid 后固件 ~1.5MB，factory 分区必须 ≥ 1.5MB
 
 ## 硬件 Bring-up（2026-08-09）
@@ -34,6 +34,16 @@
    - `SysTick_Handler` 里要调 `xPortSysTickHandler()`
 4. **heap 8KB→12KB**：5 个动态任务栈合计 ~10KB，8KB heap 在调度器启动时直接触发 malloc-failed hook 挂死
 5. **链接脚本**：`._user_heap_stack` 保留区从 8K 降到 1K（`heap_4` 用自己的静态数组，8K 保留区是纯浪费，会把 RAM 顶爆）
+
+## STM32 本地环境终端（2026-08-10）
+
+- I2C1 使用 `PB6/PB7 @ 100kHz`，实机共挂 SSD1306 `0x3C`、BH1750 `0x23`、AHT20 `0x38` 和 BMP280 `0x76/0x77`。
+- AHT20 与 BMP280 位于同一块组合模块；当前代码因此把两者放在 I2C1，而不是目标架构里预留的 I2C2。
+- AHT20 检查 CRC-8；BMP280 读取 24 字节工厂校准参数并使用整数补偿，显示单位为 °C、`% RH` 和 hPa。
+- EC11 A/B 接 PA6/PA7，使用双边沿 EXTI + Gray-code 状态表，完整四状态回到卡点后才输出一次 ±1；独立确认按键接 PA1。
+- HC-SR501 OUT 接 PB0，页面在上电后先显示 30 秒 `WARMUP`，随后显示 `DETECTED`/`CLEAR`。
+- OLED、旋转选择、确认/返回、光照、人体感应、温湿度和气压均已完成面包板验证。
+- 固件打开 `-Wall -Wextra -Werror`；本次构建无 warning。STM32F103 无 FPU，显示换算继续采用整数/定点运算。
 
 ## ESP32 编译要点（ESP-IDF 6.0.1）
 
@@ -120,4 +130,6 @@ pio run -d esp32-comm-bridge
 - [x] 实机烧录 Bootloader / Application / ESP32，并验证 Bluetooth SPP 到 STM32 的双向命令链路
 - [x] 用已构建的 `app/firmware.bin` 验证端到端 OTA（暂存、触发重启、分块、CRC、回跳）
 - [x] 用 iPhone 直连 ESP32 SoftAP，验证无需 PC 发包工具的 Web OTA
-- [ ] 按 `project-framework.md` 的 Phase 0-7 完成传感器驱动层（简历项目目标）
+- [x] 完成第一批本地外设：SSD1306、BH1750、AHT20、BMP280、HC-SR501、EC11
+- [ ] 把传感器采集从 `vAppTask` 拆成独立任务/数据模型，并控制 RAM 余量
+- [ ] 接入下一批传感器或执行器，并扩展到 ESP32 Web 仪表盘

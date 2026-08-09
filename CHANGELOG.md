@@ -6,6 +6,10 @@
 
 ## Current status / 当前状态
 
+- The STM32 application now provides a hardware-verified local environment terminal with an SSD1306 menu, EC11 navigation, BH1750 light sensing, HC-SR501 motion sensing, and AHT20/BMP280 temperature-humidity-pressure readings.
+- STM32 Application 已形成实机验证的本地环境终端：SSD1306 菜单、EC11 导航、BH1750 光照、HC-SR501 人体感应，以及 AHT20/BMP280 温湿度气压采集均已跑通。
+- All four I2C devices share I2C1 on `PB6/PB7 @ 100kHz`; the current application uses 17,676 B RAM (86.3%) and 25,200 B Flash (38.5%).
+- 四个 I2C 设备当前共用 `PB6/PB7 @ 100kHz` 的 I2C1；Application 占用 RAM 17,676 B（86.3%）、Flash 25,200 B（38.5%）。
 - Phone-driven Web OTA is hardware-verified: an iPhone connected directly to the ESP32 SoftAP, uploaded the STM32 application, and completed the update without a PC-side sender.
 - 手机 Web OTA 已通过实机验证：iPhone 直连 ESP32 SoftAP、上传 STM32 Application，并在不使用电脑发包工具的情况下完成升级。
 - The Web update moved the target from firmware version 1 to 2; a follow-up Bluetooth `VERSION` query returned `FW Version: 2`.
@@ -18,6 +22,18 @@
 - 三端固件均可构建；协议烟测同时覆盖经典 CRC 向量和全字节向量；当前硬件接线在 USART1 9600 baud 下稳定工作。
 
 ## Milestones / 里程碑
+
+### v0.12 — Local environment terminal / STM32 本地环境终端
+
+**Commit:** [`ed8a9b9`](https://github.com/finnyoun9/bluepill-ota-bootloader/commit/ed8a9b9)
+
+- 中文：新增 I2C1 HAL 总线层，并在 `PB6/PB7 @ 100kHz` 上接入 SSD1306、BH1750 与 AHT20+BMP280 组合板；AHT20 数据带 CRC-8 检查，BMP280 使用工厂校准参数和 Bosch 定点补偿算法。
+- English: Added a HAL-based I2C1 bus layer and integrated SSD1306, BH1750, and an AHT20+BMP280 combo board on `PB6/PB7 @ 100kHz`. AHT20 reads are CRC-8 checked, while BMP280 uses factory calibration and Bosch fixed-point compensation.
+- 中文：新增五页 OLED 菜单。EC11 的 A/B 相使用双边沿 EXTI 与完整 Gray-code 状态表，每个完整卡点输出一次上下事件；PA1 独立按键负责确认和返回。
+- English: Added a five-page OLED menu. The EC11 A/B phases use dual-edge EXTI and a full Gray-code transition table, publishing one navigation event per detent; a separate PA1 button handles confirm/back actions.
+- 中文：新增 HC-SR501 的 30 秒预热提示和状态页；环境页显示温度、`% RH` 湿度与 hPa 气压，全部使用整数/定点运算。
+- English: Added an HC-SR501 status page with a 30-second warm-up state. The environment page shows temperature, relative humidity in `% RH`, and pressure in hPa using integer/fixed-point math only.
+- 验证 / Validation: OLED、旋钮、确认键、BH1750、HC-SR501、AHT20 和 BMP280 均通过面包板实机验证。三目标构建和协议烟测通过；Application 使用 RAM 17,676 B（86.3%）和 Flash 25,200 B（38.5%）。 / OLED, encoder, confirm button, BH1750, HC-SR501, AHT20, and BMP280 were all verified on the breadboard. All three firmware targets and the protocol smoke test pass; the application uses 17,676 B RAM and 25,200 B Flash.
 
 ### v0.11 — Phone-driven Web OTA / 手机独立完成 Web OTA
 
