@@ -2,13 +2,15 @@
 
 > STM32 Blue Pill + FreeRTOS + ESP32 | 自定义 Bootloader + OTA | 多传感器 + Web仪表盘 + MQTT上云
 
-基于 STM32F103C8T6 (Blue Pill) + FreeRTOS + ESP32 协处理器的**智能环境监测与联动控制系统**，支持蓝牙/WiFi OTA 固件升级，Web 实时仪表盘，MQTT 上云，以及传感器→决策→执行器闭环联动控制。
+基于 STM32F103C8T6 (Blue Pill) + FreeRTOS + ESP32 协处理器的**智能环境监测与联动控制系统**。当前已完成自定义 Bootloader、蓝牙 OTA 和手机 Web OTA；传感器→决策→执行器、实时仪表盘与 MQTT 属于后续扩展目标。
 
 > 想快速回顾每次提交到底改了什么，可看双语 [CHANGELOG.md](CHANGELOG.md)。它会区分“已经实机验证”和“仍是设计/待验证”的内容。
 
 ## 项目定位
 
-嵌入式 MCU / RTOS 方向简历项目。覆盖 ARM Cortex-M3 裸机 Bootloader、FreeRTOS 多任务实时系统、7 种外设协议、多传感器驱动、ESP32 双模无线网关、以及 Web/蓝牙/Python 多层控制接口。
+嵌入式 MCU / RTOS 方向简历项目。当前核心覆盖 ARM Cortex-M3 裸机 Bootloader、FreeRTOS 多任务、ESP32 双模无线网关、自定义 UART 协议，以及 Web/蓝牙/Python 三条 OTA 入口。
+
+> 下方系统图、传感器和执行器清单包含项目目标架构；是否已经实现以“硬件 OTA 闭环验证”和 [CHANGELOG.md](CHANGELOG.md) 为准。
 
 ## 系统架构
 
@@ -35,8 +37,8 @@
 
 ### STM32 (C, FreeRTOS)
 - **Bootloader**: 8KB 裸机，Flash 分区管理，`.ramfunc` RAM 执行，CRC-32 校验，OTA 状态机
-- **FreeRTOS**: 8 任务架构（Sensor/Event/Control/Display/Comm/App/Monitor/Led），任务通知/队列/事件组/互斥锁/流缓冲区
-- **外设协议全覆盖**:
+- **FreeRTOS**: 当前 5 任务架构（Comm/Control/App/Monitor/Led）；传感器任务后续扩展
+- **规划外设协议**:
   - I2C×2 双总线（6 设备，Mutex 保护）
   - UART（双串口：ESP32 协议 + 调试日志）
   - 1-Wire（DHT11 bit-banging）
@@ -48,18 +50,18 @@
 
 ### ESP32 (C++, ESP-IDF)
 - 蓝牙 Classic SPP 服务器（手机直连控制）
+- WiFi SoftAP + 手机 Web OTA（已实机验证）
 - WiFi HTTP Client（远程 OTA 固件下载）
-- WebSocket Server（Web 仪表盘实时数据推送）
-- HTTP REST API（传感器查询 + 控制指令）
-- MQTT Client（阿里云 IoT / EMQX 数据上云）
-- SPIFFS 固件缓存 + Web 页面托管
+- SPIFFS 固件缓存 + Application 向量表/CRC 校验
+- WebSocket、传感器 REST API、MQTT（后续规划）
 
 ### 控制接口
-- **Web 仪表盘**: 纯 HTML/CSS/JS SPA，响应式，支持手机浏览器
-- **手机蓝牙**: Serial Bluetooth Terminal 文本命令
+- **手机 Web OTA**: ESP32 内置响应式页面，iPhone 可直接上传 `.bin`
+- **Web 仪表盘**: 纯 HTML/CSS/JS SPA（后续规划）
+- **蓝牙终端**: Windows/Android Classic SPP 文本命令（iPhone 不支持 SPP）
 - **Python 桌面**: `ota_sender.py` 固件上传 + `control_panel.py` 控制面板
 
-## 传感器清单
+## 规划传感器清单
 
 | 模块 | 协议 | 功能 | I2C 地址 |
 |------|------|------|----------|
@@ -76,7 +78,7 @@
 | HC-SR04 | Timer IC | 超声波测距 | - |
 | 旋转编码器 | Timer Enc | 菜单旋钮 | - |
 
-## 执行器清单
+## 规划执行器清单
 
 | 模块 | 控制方式 | 联动场景 |
 |------|---------|---------|
@@ -147,9 +149,21 @@ pio device monitor -p COM6 -b 115200
 C:\Users\yyfxy\AppData\Local\Programs\Python\Python311\python.exe `
   tools\bridge_ota.py COM6 .pio\build\app\firmware.bin --version 1
 
-# Web 仪表盘
-浏览器打开 http://<ESP32_IP>
+# 手机 Web OTA：连接 ESP32 热点后访问
+# SSID: STM32-OTA-Bridge / Password: stm32ota
+浏览器打开 http://192.168.4.1
 ```
+
+## 手机 Web OTA
+
+1. 手机连接 ESP32 热点 `STM32-OTA-Bridge`，密码 `stm32ota`
+2. Safari/浏览器打开 `http://192.168.4.1`
+3. 选择 STM32 Application 的 `firmware.bin`，填写大于 0 的目标版本
+4. 点击“开始 OTA 升级”，等待页面显示“升级成功”
+
+页面通过 `POST /api/upload?version=<N>` 上传固件，ESP32 检查 54KB 大小上限、CRC-32、Cortex-M 初始栈和 Application Reset Vector；校验通过后由 `POST /api/start` 启动 UART OTA。`GET /api/status` 返回上传和写入进度。
+
+> Web OTA 只接受链接到 `0x08002000` 的 STM32 Application 镜像。Bootloader 或其他目标生成的 `.bin` 会被向量表检查拒绝。
 
 ## 蓝牙命令
 
@@ -179,7 +193,6 @@ bluepill-ota/
 ├── bootloader/              # 8KB 自定义 Bootloader
 ├── application/             # STM32 FreeRTOS 应用
 ├── esp32-comm-bridge/       # ESP32 通信网关
-├── web-dashboard/           # Web 仪表盘
 ├── tools/                   # Python PC 工具
 └── docs/                    # 架构 + 接线 + API 文档
 ```
@@ -219,6 +232,7 @@ bluepill-ota/
 - 使用 `tools/bridge_ota.py` 暂存并发送 15,956 字节 Application 镜像，CRC-32 为 `0x3B274D7E`；ESP32 返回 `STATUS: OTA complete!`。
 - OTA 后再次发送 `VERSION`，STM32 返回 `FW Version: 1`。这次已经覆盖 PC→蓝牙 SPP→ESP32 SPIFFS→STM32 Bootloader→Flash/CRC→Application 回跳的完整闭环。
 - 排查中发现两份 CRC 查表各有 4 个错误常量；`123456789` 经典向量恰好没有触发。现在额外用 `0x00..0xFF` 全字节向量（期望 `0x29058C73`）做回归，避免同类问题被单一测试向量漏掉。
+- iPhone 已连接 ESP32 SoftAP 并打开内置 Web OTA 页面；手机上传 15,956 字节 Application 镜像、目标版本设为 2，升级后通过 COM6 查询返回 `FW Version: 2`。该路径不需要 PC、ST-Link 或 ESP32 USB 参与固件发送。
 
 ## 关键约束
 
