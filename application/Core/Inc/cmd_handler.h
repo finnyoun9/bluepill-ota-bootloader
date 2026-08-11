@@ -17,6 +17,7 @@
  *   - CMD_OTA_AVAILABLE → notifies control task → triggers OTA
  *   - CMD_APP_MSG → forwards to application task
  *   - CMD_GET_STATUS → responds with current firmware version
+ *   - CMD_GET_SENSOR_SNAPSHOT → returns the latest fixed-point app state
  *
  * @param f  Validated protocol frame.
  */

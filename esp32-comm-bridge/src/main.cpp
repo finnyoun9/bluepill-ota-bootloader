@@ -35,6 +35,7 @@
 #include "freertos/semphr.h"
 #include "esp_system.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_spiffs.h"
 #include "esp_vfs_fat.h"
 #include "esp_event.h"
@@ -102,6 +103,10 @@ static const char *TAG = "bridge";
 /* Web OTA server */
 #define WEB_OTA_TASK_STACK      8192
 #define WEB_OTA_TASK_PRIO       5
+#define SENSOR_POLL_TASK_STACK  5120
+#define SENSOR_POLL_TASK_PRIO   4
+#define SENSOR_POLL_PERIOD_MS   1000U
+#define SENSOR_CACHE_STALE_MS   5000U
 #ifndef WIFI_AP_SSID
 #define WIFI_AP_SSID            "STM32-OTA-Bridge"
 #endif
@@ -155,6 +160,10 @@ typedef enum {
 
 static volatile WebOtaState_t g_web_ota_state = WEB_OTA_IDLE;
 static httpd_handle_t g_http_server = NULL;
+static SemaphoreHandle_t g_sensor_cache_mutex = NULL;
+static SensorSnapshot_t g_sensor_cache = {};
+static bool g_sensor_cache_valid = false;
+static uint32_t g_sensor_cache_received_ms = 0;
 
 /* Bluetooth SPP is a byte stream, so a terminal command can arrive in
  * several ESP_SPP_DATA_IND_EVT callbacks. Accumulate it through CR/LF. */
@@ -170,6 +179,7 @@ static void bt_spp_init(void);
 static void wifi_init_sta(void);
 static void wifi_connect(const char *ssid, const char *password);
 static void web_server_start(void);
+static void sensor_poll_task(void *pv);
 static void bt_recv_task(void *pv);
 static void bt_spp_print(const char *msg);
 static bool download_firmware_http(const char *url);
@@ -254,6 +264,61 @@ static bool stm32_wait_cmd(uint8_t expected_cmd, ProtoFrame_t *out,
     }
 
     return false;
+}
+
+/*---------------------------------------------------------------------------
+ * Sensor snapshot cache
+ *---------------------------------------------------------------------------*/
+
+static uint32_t bridge_uptime_ms(void) {
+    return (uint32_t)(esp_timer_get_time() / 1000ULL);
+}
+
+static void sensor_poll_task(void *pv) {
+    (void)pv;
+    TickType_t last_wake = xTaskGetTickCount();
+    uint32_t consecutive_failures = 0;
+
+    for (;;) {
+        SensorSnapshot_t snapshot = {};
+        bool received = false;
+
+        if (g_ota_mutex != NULL &&
+            xSemaphoreTake(g_ota_mutex, 0) == pdTRUE) {
+            ProtoFrame_t response;
+            received = stm32_send_frame(CMD_GET_SENSOR_SNAPSHOT, NULL, 0) &&
+                       stm32_wait_cmd(CMD_SENSOR_SNAPSHOT_RSP, &response,
+                                      600) &&
+                       response.len == sizeof(snapshot);
+            if (received) {
+                memcpy(&snapshot, response.payload, sizeof(snapshot));
+            }
+            xSemaphoreGive(g_ota_mutex);
+        }
+
+        if (received &&
+            xSemaphoreTake(g_sensor_cache_mutex,
+                           pdMS_TO_TICKS(50)) == pdTRUE) {
+            g_sensor_cache = snapshot;
+            g_sensor_cache_received_ms = bridge_uptime_ms();
+            g_sensor_cache_valid = true;
+            xSemaphoreGive(g_sensor_cache_mutex);
+
+            if (consecutive_failures != 0U) {
+                ESP_LOGI(TAG, "STM32 sensor stream recovered");
+            }
+            consecutive_failures = 0;
+        } else {
+            consecutive_failures++;
+            if (consecutive_failures == 1U ||
+                (consecutive_failures % 10U) == 0U) {
+                ESP_LOGW(TAG, "STM32 sensor poll failed (%lu)",
+                         consecutive_failures);
+            }
+        }
+
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(SENSOR_POLL_PERIOD_MS));
+    }
 }
 
 /*---------------------------------------------------------------------------
@@ -703,8 +768,14 @@ static void bt_recv_task(void *pv) {
                 } else if (strncmp(cmd, "VERSION", 7) == 0 || strncmp(cmd, "version", 7) == 0) {
                     /* Query STM32 version */
                     ProtoFrame_t resp;
-                    if (stm32_send_frame(CMD_GET_STATUS, NULL, 0) &&
-                        stm32_wait_cmd(CMD_STATUS_RSP, &resp, 1500)) {
+                    bool ok = false;
+                    if (xSemaphoreTake(g_ota_mutex,
+                                       pdMS_TO_TICKS(750)) == pdTRUE) {
+                        ok = stm32_send_frame(CMD_GET_STATUS, NULL, 0) &&
+                             stm32_wait_cmd(CMD_STATUS_RSP, &resp, 1500);
+                        xSemaphoreGive(g_ota_mutex);
+                    }
+                    if (ok) {
                         char buf[64];
                         uint32_t ver = 0;
                         if (resp.len >= 4) memcpy(&ver, resp.payload, 4);
@@ -795,7 +866,8 @@ static void bt_recv_task(void *pv) {
 
                     if (!recognized) {
                         bt_spp_print("Control usage: RELAY1 ON|OFF, RELAY2 ON|OFF, RELAY, AUTO ON|OFF, MANUAL, BUZZER ON|OFF\r\n");
-                    } else if (xSemaphoreTake(g_ota_mutex, 0) != pdTRUE) {
+                    } else if (xSemaphoreTake(g_ota_mutex,
+                                              pdMS_TO_TICKS(750)) != pdTRUE) {
                         bt_spp_print("RELAY: OTA transfer busy, retry later\r\n");
                     } else {
                         ProtoFrame_t resp;
@@ -876,6 +948,96 @@ static esp_err_t web_status_handler(httpd_req_t *req) {
              g_ota_progress_sent,
              g_ota_progress_total,
              state == WEB_OTA_FAILED ? "OTA transfer failed" : "");
+    return web_send_json(req, json, NULL);
+}
+
+static void web_format_centi(char *output, size_t output_size,
+                             int32_t value) {
+    const uint32_t magnitude = value < 0
+        ? (uint32_t)(-(int64_t)value)
+        : (uint32_t)value;
+    snprintf(output, output_size, "%s%lu.%02lu",
+             value < 0 ? "-" : "",
+             (unsigned long)(magnitude / 100U),
+             (unsigned long)(magnitude % 100U));
+}
+
+static esp_err_t web_sensors_handler(httpd_req_t *req) {
+    SensorSnapshot_t snapshot = {};
+    uint32_t received_ms = 0;
+    bool cached = false;
+
+    if (g_sensor_cache_mutex != NULL &&
+        xSemaphoreTake(g_sensor_cache_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        snapshot = g_sensor_cache;
+        received_ms = g_sensor_cache_received_ms;
+        cached = g_sensor_cache_valid;
+        xSemaphoreGive(g_sensor_cache_mutex);
+    }
+
+    const uint32_t age_ms = cached
+        ? bridge_uptime_ms() - received_ms
+        : 0U;
+    const bool online = cached && age_ms <= SENSOR_CACHE_STALE_MS;
+    const bool environment_valid =
+        (snapshot.flags & SENSOR_FLAG_ENV_VALID) != 0U;
+    const bool light_valid =
+        (snapshot.flags & SENSOR_FLAG_LIGHT_VALID) != 0U;
+
+    char temperature[16];
+    char humidity[16];
+    char pressure[16];
+    char lux[12];
+    char age[16];
+    web_format_centi(temperature, sizeof(temperature),
+                     snapshot.temperature_centi_c);
+    web_format_centi(humidity, sizeof(humidity),
+                     snapshot.humidity_centi_percent);
+    web_format_centi(pressure, sizeof(pressure),
+                     (int32_t)snapshot.pressure_pa);
+    if (light_valid) {
+        snprintf(lux, sizeof(lux), "%u", snapshot.light_lux);
+    } else {
+        strcpy(lux, "null");
+    }
+    if (cached) {
+        snprintf(age, sizeof(age), "%lu", (unsigned long)age_ms);
+    } else {
+        strcpy(age, "null");
+    }
+
+    char json[768];
+    const int json_length = snprintf(
+        json, sizeof(json),
+        "{\"online\":%s,\"age_ms\":%s,\"uptime_ms\":%lu,"
+        "\"environment_valid\":%s,\"light_valid\":%s,"
+        "\"temperature\":%s,\"humidity\":%s,\"pressure\":%s,"
+        "\"lux\":%s,\"pir_ready\":%s,\"pir_warmed_up\":%s,"
+        "\"pir\":%s,\"relay1\":%s,\"relay2\":%s,"
+        "\"auto_mode\":%s,\"buzzer\":%s,"
+        "\"led_brightness\":%u,\"led_percent\":%u}",
+        online ? "true" : "false",
+        age,
+        (unsigned long)snapshot.uptime_ms,
+        environment_valid ? "true" : "false",
+        light_valid ? "true" : "false",
+        environment_valid ? temperature : "null",
+        environment_valid ? humidity : "null",
+        environment_valid ? pressure : "null",
+        lux,
+        (snapshot.flags & SENSOR_FLAG_PIR_READY) != 0U ? "true" : "false",
+        (snapshot.flags & SENSOR_FLAG_PIR_WARMED_UP) != 0U ? "true" : "false",
+        (snapshot.flags & SENSOR_FLAG_MOTION) != 0U ? "true" : "false",
+        (snapshot.flags & SENSOR_FLAG_RELAY1_ON) != 0U ? "true" : "false",
+        (snapshot.flags & SENSOR_FLAG_RELAY2_ON) != 0U ? "true" : "false",
+        (snapshot.flags & SENSOR_FLAG_AUTO_MODE) != 0U ? "true" : "false",
+        (snapshot.flags & SENSOR_FLAG_BUZZER_ON) != 0U ? "true" : "false",
+        snapshot.led_brightness,
+        snapshot.led_percent);
+    if (json_length < 0 || json_length >= (int)sizeof(json)) {
+        return web_send_json(req, "{\"message\":\"Sensor JSON overflow\"}",
+                             "500 Internal Server Error");
+    }
     return web_send_json(req, json, NULL);
 }
 
@@ -996,7 +1158,7 @@ static esp_err_t web_start_handler(httpd_req_t *req) {
 static void web_server_start(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 6144;
-    config.max_uri_handlers = 4;
+    config.max_uri_handlers = 5;
     config.recv_wait_timeout = 10;
 
     if (httpd_start(&g_http_server, &config) != ESP_OK) {
@@ -1012,6 +1174,10 @@ static void web_server_start(void) {
         .uri = "/api/status", .method = HTTP_GET,
         .handler = web_status_handler, .user_ctx = NULL
     };
+    const httpd_uri_t sensors = {
+        .uri = "/api/sensors", .method = HTTP_GET,
+        .handler = web_sensors_handler, .user_ctx = NULL
+    };
     const httpd_uri_t upload = {
         .uri = "/api/upload", .method = HTTP_POST,
         .handler = web_upload_handler, .user_ctx = NULL
@@ -1023,6 +1189,7 @@ static void web_server_start(void) {
 
     ESP_ERROR_CHECK(httpd_register_uri_handler(g_http_server, &root));
     ESP_ERROR_CHECK(httpd_register_uri_handler(g_http_server, &status));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(g_http_server, &sensors));
     ESP_ERROR_CHECK(httpd_register_uri_handler(g_http_server, &upload));
     ESP_ERROR_CHECK(httpd_register_uri_handler(g_http_server, &start));
     ESP_LOGI(TAG, "Web OTA ready: connect to %s and open http://192.168.4.1",
@@ -1200,7 +1367,8 @@ static bool download_firmware_http(const char *url) {
  *---------------------------------------------------------------------------*/
 
 static bool transfer_to_stm32(void) {
-    if (g_ota_mutex == NULL || xSemaphoreTake(g_ota_mutex, 0) != pdTRUE) {
+    if (g_ota_mutex == NULL ||
+        xSemaphoreTake(g_ota_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
         ESP_LOGE(TAG, "Another OTA transfer is already running");
         return false;
     }
@@ -1402,6 +1570,8 @@ extern "C" void app_main(void) {
 
     g_ota_mutex = xSemaphoreCreateMutex();
     ESP_ERROR_CHECK(g_ota_mutex != NULL ? ESP_OK : ESP_ERR_NO_MEM);
+    g_sensor_cache_mutex = xSemaphoreCreateMutex();
+    ESP_ERROR_CHECK(g_sensor_cache_mutex != NULL ? ESP_OK : ESP_ERR_NO_MEM);
 
     /* Init UART to STM32 */
     uart_stm32_init();
@@ -1414,6 +1584,12 @@ extern "C" void app_main(void) {
 
     /* Start phone-friendly Web OTA page on the SoftAP. */
     web_server_start();
+
+    /* Keep a non-blocking sensor snapshot cache for the Web dashboard. */
+    BaseType_t sensor_task_created =
+        xTaskCreate(sensor_poll_task, "sensor_poll", SENSOR_POLL_TASK_STACK,
+                    NULL, SENSOR_POLL_TASK_PRIO, NULL);
+    ESP_ERROR_CHECK(sensor_task_created == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
 
     /* Create BT receive task */
     xTaskCreate(bt_recv_task, "bt_recv", SPP_TASK_STACK, NULL, SPP_TASK_PRIO, NULL);

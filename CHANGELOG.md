@@ -12,8 +12,8 @@
 - 15 颗 WS2812B 已在 PB5 上通过 64MHz 时钟相关的 GPIO 位操作驱动完成实机验证；BH1750 采用平滑反向亮度曲线，只有亮度变化时才发送新帧。
 - The STM32 application now provides a hardware-verified local environment terminal with an SSD1306 menu, EC11 navigation, BH1750 light sensing, HC-SR501 motion sensing, and AHT20/BMP280 temperature-humidity-pressure readings.
 - STM32 Application 已形成实机验证的本地环境终端：SSD1306 菜单、EC11 导航、BH1750 光照、HC-SR501 人体感应，以及 AHT20/BMP280 温湿度气压采集均已跑通。
-- All four I2C devices share I2C1 on `PB6/PB7 @ 100kHz`; the current application uses 17,780 B RAM (86.8%) and 30,892 B Flash (47.1%).
-- 四个 I2C 设备当前共用 `PB6/PB7 @ 100kHz` 的 I2C1；Application 占用 RAM 17,780 B（86.8%）、Flash 30,892 B（47.1%）。
+- All four I2C devices share I2C1 on `PB6/PB7 @ 100kHz`; the current application uses 17,796 B RAM (86.9%) and 31,276 B Flash (47.7%).
+- 四个 I2C 设备当前共用 `PB6/PB7 @ 100kHz` 的 I2C1；Application 占用 RAM 17,796 B（86.9%）、Flash 31,276 B（47.7%）。
 - Phone-driven Web OTA is hardware-verified: an iPhone connected directly to the ESP32 SoftAP, uploaded the STM32 application, and completed the update without a PC-side sender.
 - 手机 Web OTA 已通过实机验证：iPhone 直连 ESP32 SoftAP、上传 STM32 Application，并在不使用电脑发包工具的情况下完成升级。
 - The Web update moved the target from firmware version 1 to 2; a follow-up Bluetooth `VERSION` query returned `FW Version: 2`.
@@ -24,6 +24,8 @@
 - 15,956 字节的应用镜像（`CRC32 0x3B274D7E`）已完成 OTA；重启后 STM32 新应用返回 `FW Version: 1`。
 - All three firmware targets build, the protocol smoke test passes both the classic and all-byte CRC vectors, and the current hardware wiring is stable at USART1 115200 baud.
 - 三端固件均可构建；协议烟测同时覆盖经典 CRC 向量和全字节向量；当前硬件接线在 USART1 115200 baud 下稳定工作。
+- The realtime Web dashboard is hardware-verified end to end: an 18-byte STM32 fixed-point snapshot, a 1-second ESP32 UART cache, and `GET /api/sensors`, with both firmware images flashed and live LAN data confirmed.
+- 实时 Web 仪表盘已完成端到端实机验证：STM32 18 字节定点快照、ESP32 每秒 UART 缓存和 `GET /api/sensors` 均已烧录运行，局域网页面能持续显示真实数据。
 
 ## Milestones / 里程碑
 
@@ -34,6 +36,14 @@
 - 中文：WS2812B 的 SPI1 4MHz/5-bit 编码在 DIN 上看起来满足时序，但第一颗灯珠 DOUT 没有转发。切换到 PB5 GPIO bit-bang 后，DOUT 捕获到后 14 颗的 336 bit / 42 字节有效帧。最终保留 bit-bang，并将 BH1750 的 5~1000 lux 反向映射到亮度 160~1，每 200ms 计算、每次平滑变化 16 级、2 级死区抑制抖动、仅变化时发帧。
 - English: The SPI1 4MHz/5-bit waveform looked valid at DIN, but the first LED produced no DOUT. After switching to PB5 GPIO bit-banging, DOUT carried a valid 336-bit / 42-byte frame for the remaining 14 LEDs. The final driver keeps bit-banging and maps BH1750's 5..1000 lux range inversely to brightness 160..1, evaluated every 200ms with a 16-level step, a 2-level deadband, and change-only transmission.
 - 验证 / Validation: Application builds without warnings at RAM 17,780 B (86.8%) and Flash 30,892 B (47.1%). Logic-analyzer evidence is retained under `docs/captures/`. / Application builds without warnings at RAM 17,780 B (86.8%) and Flash 30,892 B (47.1%); logic-analyzer evidence is retained under `docs/captures/`.
+
+### Unreleased — Realtime Web sensor dashboard / Web 实时传感器仪表盘
+
+- 中文：新增 `CMD_GET_SENSOR_SNAPSHOT (0x32)` / `CMD_SENSOR_SNAPSHOT_RSP (0x87)` 和 18B 定点快照。STM32 在现有 `vAppTask` 内发布状态，没有新增任务或浮点格式化。
+- English: Added `CMD_GET_SENSOR_SNAPSHOT (0x32)` / `CMD_SENSOR_SNAPSHOT_RSP (0x87)` and an 18-byte fixed-point snapshot. STM32 publishes it from the existing `vAppTask`, without another task or floating-point formatting.
+- 中文：ESP32 每秒查询并缓存快照，新增 `GET /api/sensors`；Web 首页按秒刷新真实传感器和执行器状态，缓存超过 5 秒即显示数据超时。OTA、蓝牙命令与轮询共享 UART 事务锁。
+- English: The ESP32 polls and caches the snapshot once per second and exposes `GET /api/sensors`. The Web home page refreshes real sensor and actuator state every second and reports a timeout after 5 seconds; OTA, Bluetooth commands, and polling share one UART transaction lock.
+- 验证 / Validation: protocol smoke test and both firmware builds pass. Application: RAM 17,796 B (86.9%), Flash 31,276 B (47.7%). ESP32: RAM 65,184 B (19.9%), Flash 1,370,061 B (74.7%). Both images are flashed; repeated LAN API reads stayed online with sub-second cache age, and the embedded dashboard displayed live sensor values (latest snapshot 24.9°C / 51.9%RH / 81 lux at ~345ms cache age). / 协议烟测和两端构建通过；两端固件均已烧录，局域网 API 连续读取保持在线且缓存年龄低于 1 秒，板载仪表盘能显示实时传感器值（最新快照 24.9°C / 51.9%RH / 81 lux，缓存约 345ms）。
 
 ### v0.13 — Two-channel relay control / 两路继电器控制
 

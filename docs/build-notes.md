@@ -7,8 +7,8 @@
 | 固件 | 工具链 | RAM | Flash | 产物 |
 |------|--------|-----|-------|------|
 | Bootloader | `pio run -e bluepill` | 11.0% (2260B) | 10.7% (7040B) | `.pio/build/bluepill/firmware.bin` |
-| Application | `pio run -e app` | 86.8% (17780B) | 47.1% (30892B) | `.pio/build/app/firmware.bin` |
-| ESP32 Bridge | `pio run -d esp32-comm-bridge` | 19.9% (65152B) | 73.6% (1351185B / 1835008B) | `esp32-comm-bridge/.pio/build/esp32dev/firmware.bin` |
+| Application | `pio run -e app` | 86.9% (17796B) | 47.7% (31276B) | `.pio/build/app/firmware.bin` |
+| ESP32 Bridge | `pio run -d esp32-comm-bridge` | 19.9% (65184B) | 74.7% (1370061B / 1835008B) | `esp32-comm-bridge/.pio/build/esp32dev/firmware.bin` |
 
 - Bootloader 产物约 6.9KB，满足 **8KB 硬约束**
 - Application 仍在 54KB 应用区内；RAM 仅余 2,700B，后续增加任务或大缓冲区前必须检查 heap/stack 余量
@@ -133,6 +133,15 @@ pio run -d esp32-comm-bridge
 - Web/蓝牙传输共用 FreeRTOS Mutex；真正的 STM32 OTA 在独立 8KB 栈任务中执行，HTTP 状态查询不会被 115200-baud 写入过程阻塞
 - 实机结果：iPhone 上传 15,956 字节 `fw_v2.bin`，页面完成升级；COM6 查询得到 `FW Version: 2`
 
+## Web 实时仪表盘（2026-08-11）
+
+- `vAppTask` 每 200ms 把当前传感器和执行器状态复制到 18B `SensorSnapshot_t`；`vCommTask` 收到 `CMD_GET_SENSOR_SNAPSHOT (0x32)` 后返回 `CMD_SENSOR_SNAPSHOT_RSP (0x87)`。
+- ESP32 新增 `sensor_poll` 任务，每 1 秒查询一次 STM32 并写入 Mutex 保护的静态缓存；`GET /api/sensors` 只读取缓存，不让浏览器请求直接占用 UART。
+- 传感器轮询、蓝牙 `VERSION`/继电器命令和 OTA 共用 UART 事务锁。OTA 持锁期间轮询跳过；缓存超过 5 秒未更新时页面显示数据超时。
+- 页面改成首页/控制/系统三页：首页实时显示温湿度、气压、光照、PIR、继电器、蜂鸣器、自动模式与灯带亮度；系统页保留原 Web OTA；控制写接口仍标记为待接入。
+- 协议烟测加入 18B 快照帧 round-trip，用 CRC 帧构建与解析验证结构体字节不变。三目标编译无 warning；新版 STM32 Application 已由 ST-Link 写入并 Verify OK，ESP32 固件烧录后 Flash hash 校验通过。ESP32 接入 2.4GHz Wi-Fi 后，`GET /api/sensors` 连续返回真实数据，`online=true`、`age_ms<1000`，板载页面按秒刷新通过实机回归。
+- 完整协议字段、REST JSON 和断线检查步骤见 [web-realtime-dashboard.md](web-realtime-dashboard.md)。
+
 ## 下一步
 
 - [x] 实机烧录 Bootloader / Application / ESP32，并验证 Bluetooth SPP 到 STM32 的双向命令链路
@@ -141,7 +150,8 @@ pio run -d esp32-comm-bridge
 - [x] 完成第一批本地外设：SSD1306、BH1750、AHT20、BMP280、HC-SR501、EC11
 - [x] 完成 PA2/PA3 两路继电器、PB1 蜂鸣器和 PB5 WS2812B 自动调光实机闭环
 - [ ] 用本阶段最终 Application 再做一次 Bluetooth/Web OTA 回归，记录版本、镜像大小和 CRC
-- [ ] 定义 STM32→ESP32 传感器快照协议，ESP32 提供 `/api/sensors` 和 `/ws`；本地网页参考 ESP-IDF 官方 `restful_server` 与 `ws_echo_server`
+- [x] 定义 STM32→ESP32 传感器快照协议并提供 `/api/sensors` 实时状态页
+- [ ] 增加 `/ws` 推送与 Web 写控制接口
 - [ ] Pi5 继续使用现有 Mosquitto，接入 Node-RED + FlowFuse Dashboard 2.0，做可远程访问的实时曲线与状态卡片
 - [ ] 加湿器模块到货后接继电器1，验证 `<40%` 开、`>=45%` 关的自动模式；此前暂停增加传感器硬件
 
@@ -158,7 +168,7 @@ pio run -d esp32-comm-bridge
 - 供电为 DP100 5V 经 1N4001 降到约 4.2V，灯带和 STM32 共地；`PB5 → DIN`。入口建议串 220~470Ω 数据电阻并并联 470~1000µF 电容，但本次无响应并不是没串数据电阻造成的。
 - BH1750 每 200ms 更新目标亮度：`≤5 lux → 160/255`、`≥1000 lux → 1/255`，中间反向线性映射；每次最多变化 16 级，2 级死区过滤小幅传感器抖动。WS2812B 会保持锁存状态，所以只有亮度变化时才发帧，减少约 0.5ms 关中断窗口对 UART/FreeRTOS 的影响。
 - 15 颗灯全白、亮度 160 时按每颗满白 60mA 的保守上限估算约 0.57A；DP100 限流建议设在 0.8~1.0A，并留意串联 1N4001 的温升。
-- 当前 Application 构建通过且无 warning：RAM `17,780 / 20,480 bytes (86.8%)`，Flash `30,892 / 65,536 bytes (47.1%)`。
+- 当时灯带闭环版本的 Application 构建占用为 RAM `17,780 / 20,480 bytes (86.8%)`、Flash `30,892 / 65,536 bytes (47.1%)`；加入 Web 实时快照后的当前值见本文顶部构建表。
 
 ### 这次排障为什么重要
 

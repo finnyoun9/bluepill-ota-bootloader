@@ -60,6 +60,7 @@ static bool                 g_pir_ready;
 static bool                 g_buzzer_ready;
 static bool                 g_relay_ready;
 static bool                 g_ws2812b_ready;
+static volatile SensorSnapshot_t g_sensor_snapshot;
 
 /* The CMSIS startup file copies .data only. ota_config.c places the short
  * Flash erase/program wrappers in .ramfunc, so initialize that section before
@@ -81,6 +82,8 @@ extern uint8_t _eramfunc;
 #define WS2812_FALLBACK_BRIGHTNESS   24U
 #define WS2812_BRIGHTNESS_STEP       16U
 #define WS2812_BRIGHTNESS_DEADBAND   2U
+#define WS2812_REFRESH_MS             1000U
+#define SENSOR_SNAPSHOT_UPDATE_MS    200U
 
 /*---------------------------------------------------------------------------
  * System init
@@ -387,12 +390,14 @@ static void ui_render_system(void) {
     }
     ui_display_show_string(2U, 9U,
                            relay_auto_enabled() ? "A:ON " : "A:OFF");
-    ui_display_show_string(3U, 1U, "R1:");
+    ui_display_show_string(3U, 1U, "LED:");
     ui_display_show_string(3U, 4U,
-                           relay_get_state(0U) ? "ON " : "OFF");
-    ui_display_show_string(3U, 8U, "R2:");
-    ui_display_show_string(3U, 11U,
-                           relay_get_state(1U) ? "ON " : "OFF");
+                           relay_get_state(RELAY_LIGHT_CHANNEL)
+                               ? " ON" : "OFF");
+    ui_display_show_string(3U, 9U, "HUM:");
+    ui_display_show_string(3U, 13U,
+                           relay_get_state(RELAY_HUMIDIFIER_CHANNEL)
+                               ? "ON " : "OFF");
     ui_display_show_string(4U, 1U, "PRESS TO BACK");
 }
 
@@ -528,6 +533,67 @@ static uint8_t ws2812_smooth_brightness(uint8_t current, uint8_t target) {
     return current;
 }
 
+static void sensor_snapshot_publish(
+    TickType_t now,
+    const EnvironmentReading_t *environment,
+    bool environment_valid,
+    uint16_t light_lux,
+    bool light_valid,
+    bool motion_detected,
+    bool pir_warmed_up,
+    uint8_t led_brightness) {
+    SensorSnapshot_t snapshot = {0};
+    snapshot.uptime_ms = (uint32_t)(now * portTICK_PERIOD_MS);
+    snapshot.temperature_centi_c = environment->temperature_centi_c;
+    snapshot.humidity_centi_percent = environment->humidity_centi_percent;
+    snapshot.pressure_pa = environment->pressure_pa;
+    snapshot.light_lux = light_lux;
+    const bool light_power_on =
+        g_relay_ready && relay_get_state(RELAY_LIGHT_CHANNEL);
+    const uint8_t effective_led_brightness =
+        light_power_on ? led_brightness : 0U;
+    snapshot.led_brightness = effective_led_brightness;
+
+    uint32_t led_percent =
+        ((uint32_t)effective_led_brightness * 100U +
+         (WS2812_DARK_BRIGHTNESS / 2U)) /
+        WS2812_DARK_BRIGHTNESS;
+    snapshot.led_percent =
+        (uint8_t)(led_percent > 100U ? 100U : led_percent);
+
+    if (environment_valid) {
+        snapshot.flags |= SENSOR_FLAG_ENV_VALID;
+    }
+    if (light_valid) {
+        snapshot.flags |= SENSOR_FLAG_LIGHT_VALID;
+    }
+    if (g_pir_ready) {
+        snapshot.flags |= SENSOR_FLAG_PIR_READY;
+    }
+    if (pir_warmed_up) {
+        snapshot.flags |= SENSOR_FLAG_PIR_WARMED_UP;
+    }
+    if (motion_detected) {
+        snapshot.flags |= SENSOR_FLAG_MOTION;
+    }
+    if (g_relay_ready && relay_get_state(RELAY_LIGHT_CHANNEL)) {
+        snapshot.flags |= SENSOR_FLAG_RELAY1_ON;
+    }
+    if (g_relay_ready && relay_get_state(RELAY_HUMIDIFIER_CHANNEL)) {
+        snapshot.flags |= SENSOR_FLAG_RELAY2_ON;
+    }
+    if (g_relay_ready && relay_auto_enabled()) {
+        snapshot.flags |= SENSOR_FLAG_AUTO_MODE;
+    }
+    if (g_buzzer_ready && buzzer_get_state()) {
+        snapshot.flags |= SENSOR_FLAG_BUZZER_ON;
+    }
+
+    taskENTER_CRITICAL();
+    g_sensor_snapshot = snapshot;
+    taskEXIT_CRITICAL();
+}
+
 static void vAppTask(void *pvParameters) {
     (void)pvParameters;
     uint8_t data[64];
@@ -543,9 +609,12 @@ static void vAppTask(void *pvParameters) {
         g_encoder_ready && rotary_encoder_button_pressed();
     TickType_t last_light_read = 0U;
     TickType_t last_ws2812_update = 0U;
+    TickType_t last_ws2812_refresh = 0U;
+    TickType_t last_sensor_snapshot = 0U;
     uint8_t ws2812_brightness =
         ws2812_target_brightness(light_lux, light_valid);
     uint8_t ws2812_last_sent = 0U;
+    bool ws2812_frame_sent = false;
     const TickType_t app_started_at = xTaskGetTickCount();
     TickType_t last_environment_start = app_started_at;
     TickType_t environment_started_at = app_started_at;
@@ -555,16 +624,12 @@ static void vAppTask(void *pvParameters) {
     if (g_display_ready) {
         ui_render_menu(selected);
     }
-    if (g_ws2812b_ready) {
-        g_ws2812b_ready =
-            ws2812b_show_white(ws2812_brightness);
-        if (g_ws2812b_ready) {
-            ws2812_last_sent = ws2812_brightness;
-        }
-    }
-
     bool relay_ui_shown[RELAY_CHANNELS] = { false, false };
     bool auto_ui_shown = false;
+
+    sensor_snapshot_publish(app_started_at, &environment, environment_valid,
+                            light_lux, light_valid, motion_detected,
+                            pir_warmed_up, ws2812_brightness);
 
     for (;;) {
         /* Receive control commands from ESP32 (BT serial bridge) */
@@ -630,11 +695,23 @@ static void vAppTask(void *pvParameters) {
                 ws2812_target_brightness(light_lux, light_valid);
             ws2812_brightness =
                 ws2812_smooth_brightness(ws2812_brightness, target);
-            if (ws2812_brightness != ws2812_last_sent) {
+
+            const bool light_power_on =
+                g_relay_ready && relay_get_state(RELAY_LIGHT_CHANNEL);
+            if (!light_power_on) {
+                /* Relay 1 removed strip power. Force a fresh frame after the
+                 * next power-on even if the brightness value is unchanged. */
+                ws2812_frame_sent = false;
+            } else if (!ws2812_frame_sent ||
+                       ws2812_brightness != ws2812_last_sent ||
+                       (now - last_ws2812_refresh) >=
+                           pdMS_TO_TICKS(WS2812_REFRESH_MS)) {
                 g_ws2812b_ready =
                     ws2812b_show_white(ws2812_brightness);
                 if (g_ws2812b_ready) {
                     ws2812_last_sent = ws2812_brightness;
+                    ws2812_frame_sent = true;
+                    last_ws2812_refresh = now;
                 }
             }
         }
@@ -648,16 +725,22 @@ static void vAppTask(void *pvParameters) {
                 ui_render_environment(&environment, environment_valid);
             }
 
-            /* Auto linkage: humidifier (relay 1) with hysteresis. */
-            if (g_relay_ready && relay_auto_enabled() && environment_valid) {
-                const uint32_t humidity =
-                    (uint32_t)environment.humidity_centi_percent;
-                if (relay_get_state(0U)) {
-                    if (humidity >= RELAY_AUTO_HUM_OFF) {
-                        relay_set(0U, false);
+            /* Auto linkage: humidifier on relay 2 with hysteresis. */
+            if (g_relay_ready && relay_auto_enabled()) {
+                if (!environment_valid) {
+                    /* Fail safe: do not keep atomizing without a valid
+                     * humidity measurement. */
+                    relay_set(RELAY_HUMIDIFIER_CHANNEL, false);
+                } else {
+                    const uint32_t humidity =
+                        (uint32_t)environment.humidity_centi_percent;
+                    if (relay_get_state(RELAY_HUMIDIFIER_CHANNEL)) {
+                        if (humidity >= RELAY_AUTO_HUM_OFF) {
+                            relay_set(RELAY_HUMIDIFIER_CHANNEL, false);
+                        }
+                    } else if (humidity < RELAY_AUTO_HUM_ON) {
+                        relay_set(RELAY_HUMIDIFIER_CHANNEL, true);
                     }
-                } else if (humidity < RELAY_AUTO_HUM_ON) {
-                    relay_set(0U, true);
                 }
             }
         } else if (!environment_pending &&
@@ -705,6 +788,14 @@ static void vAppTask(void *pvParameters) {
             if (relay_changed && g_display_ready) {
                 ui_render_system();
             }
+        }
+
+        if ((now - last_sensor_snapshot) >=
+            pdMS_TO_TICKS(SENSOR_SNAPSHOT_UPDATE_MS)) {
+            last_sensor_snapshot = now;
+            sensor_snapshot_publish(now, &environment, environment_valid,
+                                    light_lux, light_valid, motion_detected,
+                                    pir_warmed_up, ws2812_brightness);
         }
     }
 }
@@ -823,6 +914,18 @@ void cmd_handler_dispatch(const ProtoFrame_t *f) {
                 version = cfg.fw_version;
             }
             cmd_handler_send_frame(CMD_STATUS_RSP, (uint8_t *)&version, 4);
+        }
+        break;
+
+    case CMD_GET_SENSOR_SNAPSHOT:
+        {
+            SensorSnapshot_t snapshot;
+            taskENTER_CRITICAL();
+            snapshot = g_sensor_snapshot;
+            taskEXIT_CRITICAL();
+            cmd_handler_send_frame(CMD_SENSOR_SNAPSHOT_RSP,
+                                   (const uint8_t *)&snapshot,
+                                   sizeof(snapshot));
         }
         break;
 

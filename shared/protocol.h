@@ -78,6 +78,7 @@ extern "C" {
 #define CMD_APP_MSG             0x20U  /* passthrough data to application */
 #define CMD_GET_STATUS          0x30U
 #define CMD_RESET               0x31U
+#define CMD_GET_SENSOR_SNAPSHOT 0x32U  /* request latest app sensor state */
 
 /* Slave → Master (STM32 → ESP32) */
 #define CMD_OTA_BEGIN_ACK       0x81U
@@ -86,6 +87,18 @@ extern "C" {
 #define CMD_OTA_RESULT          0x84U
 #define CMD_STATUS_RSP          0x85U
 #define CMD_OTA_READY           0x86U  /* app saved OTA request and will reboot */
+#define CMD_SENSOR_SNAPSHOT_RSP 0x87U
+
+/* SensorSnapshot_t.flags */
+#define SENSOR_FLAG_ENV_VALID     (1U << 0)
+#define SENSOR_FLAG_LIGHT_VALID   (1U << 1)
+#define SENSOR_FLAG_PIR_READY     (1U << 2)
+#define SENSOR_FLAG_PIR_WARMED_UP (1U << 3)
+#define SENSOR_FLAG_MOTION        (1U << 4)
+#define SENSOR_FLAG_RELAY1_ON     (1U << 5)
+#define SENSOR_FLAG_RELAY2_ON     (1U << 6)
+#define SENSOR_FLAG_AUTO_MODE     (1U << 7)
+#define SENSOR_FLAG_BUZZER_ON     (1U << 8)
 
 /*---------------------------------------------------------------------------
  * Error codes (in NAK / RSP_ERROR payloads)
@@ -156,9 +169,33 @@ typedef struct {
     uint32_t cfg_crc32;         /* CRC-32 of all preceding fields */
 } BootConfig_t;
 
+/**
+ * @brief Fixed-point application state returned to the ESP32.
+ *
+ * Multi-byte values use the native little-endian representation shared by
+ * the current STM32F1 and ESP32 targets. Validity and actuator state live in
+ * flags so the payload stays compact and does not require software floats.
+ */
+typedef struct {
+    uint32_t uptime_ms;
+    int16_t  temperature_centi_c;
+    uint16_t humidity_centi_percent;
+    uint32_t pressure_pa;
+    uint16_t light_lux;
+    uint16_t flags;
+    uint8_t  led_brightness;    /* raw WS2812B channel value, 0..255 */
+    uint8_t  led_percent;       /* 0..100 relative to configured max */
+} SensorSnapshot_t;
+
 /* Statically verify sizes */
-#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+#if defined(__cplusplus)
+static_assert(sizeof(BootConfig_t) == 48, "BootConfig_t size mismatch");
+static_assert(sizeof(SensorSnapshot_t) == 18,
+              "SensorSnapshot_t size mismatch");
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 _Static_assert(sizeof(BootConfig_t) == 48, "BootConfig_t size mismatch");
+_Static_assert(sizeof(SensorSnapshot_t) == 18,
+               "SensorSnapshot_t size mismatch");
 #endif
 
 #pragma pack(pop)

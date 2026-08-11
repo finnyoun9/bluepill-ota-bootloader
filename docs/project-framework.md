@@ -8,7 +8,7 @@
 
 - 已完成：SSD1306 本地菜单、EC11 旋转/确认、BH1750、HC-SR501、AHT20+BMP280 温湿度气压、两路继电器、有源蜂鸣器和 WS2812B 自动调光。
 - 当前 AHT20 与 BMP280 是一块组合模块，因此和 OLED、BH1750 一起共用 I2C1 `PB6/PB7 @ 100kHz`；下面的 I2C2 分组仍是后续目标架构。
-- 当前本地 UI、传感器采样、WS2812B 调光和湿度→继电器1联动集成在已有 `vAppTask` 中；独立 SensorTask/DisplayTask、更多执行器联动、Web 仪表盘和 MQTT 仍待实现。
+- 当前本地 UI、传感器采样、WS2812B 调光和湿度→继电器1联动集成在已有 `vAppTask` 中；STM32 与 ESP32 新版固件均已烧录，实时 Web 状态页和 `/api/sensors` 已完成局域网实机回归。独立 SensorTask/DisplayTask、Web 写控制、WebSocket 和 MQTT 仍待实现。
 
 ---
 
@@ -212,11 +212,12 @@ WS2812B 的 1N4001 串在正电源线上：二极管无条纹端接外部 5V，�
   ├─→ ControlTask 阈值判断
   │     └─→ 继电器/蜂鸣器/舵机/雾化片 动作
   │
-  └─→ CommTask JSON 打包
+  └─→ CommTask 返回 18B 定点快照
         │
         └─→ UART → ESP32
                     │
-                    ├─→ WebSocket → Web 仪表盘（实时推送）
+                    ├─→ HTTP REST → Web 仪表盘（当前 1s 轮询）
+                    ├─→ WebSocket → Web 仪表盘（后续推送）
                     ├─→ MQTT Publish → 云平台（持久化）
                     ├─→ BT SPP → 手机 APP（按需查询）
                     └─→ HTTP REST → GET /api/sensors（轮询）
@@ -237,33 +238,32 @@ WS2812B 的 1N4001 串在正电源线上：二极管无条纹端接外部 5V，�
 
 ### 4.1 Web 仪表盘（ESP32 直接提供）
 
-当前已实现并实机验证的是独立的手机 Web OTA：ESP32 常驻 SoftAP `STM32-OTA-Bridge`，浏览器访问 `http://192.168.4.1`，页面从固件只读段提供，SPIFFS 专门用于暂存 STM32 Application。接口为 `GET /api/status`、`POST /api/upload?version=<N>`、`POST /api/start`。
-
-下面的传感器仪表盘、WebSocket 和控制接口仍是 Phase 4 规划，不应理解为已经实现：
+ESP32 常驻 SoftAP `STM32-OTA-Bridge`，浏览器访问 `http://192.168.4.1`；也可通过蓝牙 `WIFI <ssid>,<password>` 保存路由器配置，在局域网地址访问。页面从固件只读段提供，SPIFFS 专门用于暂存 STM32 Application。手机 Web OTA、实时仪表盘和 `/api/sensors` 均已完成实机验证。
 
 ```
 ESP32 启动后：
   - HTTP Server (port 80) → 提供 index.html
-  - WebSocket Server (port 81) → 实时 JSON push
   - REST API:
       GET  /api/sensors     → 最新传感器数据 JSON
-      POST /api/control     → {"relay1": true, "relay2": false}
-      GET  /api/ota/status  → OTA 状态
+      GET  /api/status      → OTA 状态
+      POST /api/upload      → 上传 STM32 Application
+      POST /api/start       → 启动 OTA
+  - 后续：WebSocket push、POST /api/control、MQTT
 ```
 
 **Web 页面功能**：
 - 传感器仪表盘（温度表、湿度环、光照、气压）
-- 实时曲线（用 Chart.js，最近 5 分钟历史）
-- 开关控制按钮（继电器1/2、雾化片、蜂鸣器静音）
-- 模式切换（手动/自动）
+- 实时状态卡片（当前已实现，1 秒刷新）
+- 实时曲线（后续由 Pi5/Node-RED 保存历史）
+- 开关控制按钮与模式切换（页面已预留，写接口待实现）
 - OTA 固件上传按钮
 - 暗色主题，响应式布局（手机上也能看）
 
-技术栈：纯 HTML + CSS + JS（一个 index.html，约 500 行），Chart.js CDN。
+技术栈：ESP32 固件内嵌纯 HTML + CSS + JS，完全离线运行，不依赖 CDN。
 
 ### 4.2 手机端
 
-**方案 A（当前已实现）**：手机连接 `STM32-OTA-Bridge` 热点并打开 `http://192.168.4.1`，可完成 STM32 Application OTA。传感器仪表盘仍待 Phase 4。
+**方案 A（当前已实现）**：手机连接 `STM32-OTA-Bridge` 热点并打开 `http://192.168.4.1`，或让 ESP32 接入家庭 Wi-Fi 后访问其 DHCP 地址，可查看每秒刷新的实时状态并完成 STM32 Application OTA。两种网络入口共用同一套板载页面和 REST API。
 
 **方案 B（蓝牙）**：手机装一个 "Serial Bluetooth Terminal" APP，连接 ESP32 蓝牙 SPP，发文本命令：
 ```
@@ -427,25 +427,11 @@ bluepill-ota/
 
 ---
 
-## 七、协议扩展
+## 七、当前传感器快照协议
 
-UART 协议新增传感器数据上报命令：
+ESP32 每秒发送一次 `CMD_GET_SENSOR_SNAPSHOT (0x32)`；STM32 返回 `CMD_SENSOR_SNAPSHOT_RSP (0x87)` 和 18B `SensorSnapshot_t`。快照包含定点温湿度气压、lux、PIR、两路继电器、自动模式、蜂鸣器和灯带亮度。STM32 不拼 JSON，ESP32 缓存后由 `GET /api/sensors` 转换为浏览器使用的 JSON。
 
-```c
-#define CMD_SENSOR_DATA      0x21  // STM32→ESP32: JSON 传感器数据
-#define CMD_CONTROL_CMD      0x22  // ESP32→STM32: 控制指令
-#define CMD_CONTROL_ACK      0x86  // STM32→ESP32: 控制确认
-```
-
-STM32 每 1 秒发送一次：
-```json
-{"t":26.3,"h":58.2,"p":1013.2,"lx":342,"smoke":120,"ax":0.1,"ay":0.0,"az":1.0,"dist":45,"pir":1,"door":0,"relay1":0,"relay2":1,"mist":1,"buzz":0,"fw":3}
-```
-
-ESP32→STM32 控制指令：
-```json
-{"relay1":1,"relay2":0,"mist":1,"mode":"auto","thresh_temp":30}
-```
+传感器轮询、蓝牙命令和 OTA 共用 UART 事务锁；缓存超过 5 秒未更新时 Web 标记 STM32 离线。字段、标志位和验证步骤见 [web-realtime-dashboard.md](web-realtime-dashboard.md)。Web 写控制仍沿用现有 `CMD_APP_MSG` 文本命令，后续再增加 `POST /api/control`，不在本阶段另造第二套控制协议。
 
 ---
 
@@ -472,7 +458,7 @@ ESP32→STM32 控制指令：
 | **Phase 1** | STM32 当前批次传感器（AHT20/BMP280/BH1750/PIR） | 暂告一段落 |
 | **Phase 2** | 继电器/蜂鸣器已完成；加湿器联动等待模块到货 | 等待硬件 |
 | **Phase 3** | FreeRTOS 任务整合 + 联动控制逻辑（湿度继电器、光照灯带已完成） | 进行中 |
-| **Phase 4** | ESP32 WebSocket + HTTP + Web 仪表盘 | 下一阶段 |
+| **Phase 4** | HTTP 实时仪表盘已完成代码；WebSocket/写控制待扩展 | 进行中 |
 | **Phase 5** | ESP32 MQTT 上云 | 代码 |
 | **Phase 6** | Python 桌面控制面板 | 代码 |
 | **Phase 7** | 整体联调 + OTA 验证 | 联调 |
