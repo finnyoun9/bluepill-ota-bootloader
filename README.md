@@ -273,7 +273,7 @@ bluepill-ota/
 - WS2812B 使用 DP100 5V 经 1N4001 降到约 4.2V，数据线为 `PB5 → DIN`，灯带与 STM32 共地。入口串联 220~470Ω 数据电阻仍建议保留，但本次故障并不是缺少该电阻。
 - 原 SPI1 4MHz/5-bit 编码在 `DIN` 上测得的脉宽和数据都合理，但第一颗灯珠 `DOUT` 没有转发，灯带实际未接收。换回 64MHz 下经过实机验证的 GPIO bit-bang 后，第一颗 `DOUT` 捕获到后 14 颗共 336 bit、42 字节的有效帧，才算真正闭环。
 - 最终逻辑：BH1750 每 200ms 更新目标亮度，`≤5 lux → 160/255`、`≥1000 lux → 1/255`，中间反向线性映射；每次最多变化 16 级，2 级以内视为传感器抖动，且仅亮度确实变化时发送灯带帧。
-- 加入 Web 实时快照后的 Application 构建占用：RAM 17,796 B（86.9%），Flash 31,276 B（47.7%）。完整波形证据和排障结论见 [docs/build-notes.md](docs/build-notes.md)。
+- 加入 Web 实时快照后的 Application 构建占用：RAM 17,796 B（86.9%），Flash 31,348 B（47.8%）。完整波形证据和排障结论见 [docs/build-notes.md](docs/build-notes.md)。
 
 ## 关键约束
 
