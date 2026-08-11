@@ -108,8 +108,8 @@ static const char WEB_OTA_PAGE[] = R"WEBOTA(
         <div class="panel-title"><h2>设备状态</h2><span>STM32 actuators</span></div>
         <div class="device-grid">
           <div class="device"><div class="device-top"><i class="state-dot" id="pirDot"></i><span>人体</span></div><b id="pirState">--</b><small>PIR sensor</small></div>
-          <div class="device"><div class="device-top"><i class="state-dot" id="relay1Dot"></i><span>继电器 1</span></div><b id="relay1State">--</b><small>Humidifier</small></div>
-          <div class="device"><div class="device-top"><i class="state-dot" id="relay2Dot"></i><span>继电器 2</span></div><b id="relay2State">--</b><small>Reserved</small></div>
+          <div class="device"><div class="device-top"><i class="state-dot" id="relay1Dot"></i><span>继电器 1</span></div><b id="relay1State">--</b><small>灯带 VCC</small></div>
+          <div class="device"><div class="device-top"><i class="state-dot" id="relay2Dot"></i><span>继电器 2</span></div><b id="relay2State">--</b><small>加湿器 VCC</small></div>
           <div class="device"><div class="device-top"><i class="state-dot" id="ledDot"></i><span>灯带</span></div><b id="ledState">--</b><small id="ledDetail">WS2812B</small></div>
           <div class="device"><div class="device-top"><i class="state-dot" id="buzzerDot"></i><span>蜂鸣器</span></div><b id="buzzerState">--</b><small>Active low</small></div>
         </div>
@@ -129,8 +129,8 @@ static const char WEB_OTA_PAGE[] = R"WEBOTA(
   <section class="page" id="control">
     <div class="panel-title"><h2>本地设备控制</h2><span>后端协议接入后启用</span></div>
     <div class="control-grid">
-      <article class="control-card"><div><h3>加湿器</h3><p>继电器 1 · 自动湿度控制</p><span class="pending">待接入</span></div><button class="switch" disabled aria-label="加湿器开关"></button></article>
-      <article class="control-card"><div><h3>继电器 2</h3><p>预留负载通断控制</p><span class="pending">待接入</span></div><button class="switch" disabled aria-label="继电器2开关"></button></article>
+      <article class="control-card"><div><h3>加湿器</h3><p>继电器 2 · 自动湿度控制</p><span class="pending">待接入</span></div><button class="switch" disabled aria-label="加湿器开关"></button></article>
+      <article class="control-card"><div><h3>灯带电源</h3><p>继电器 1 · 通断 WS2812B VCC</p><span class="pending">待接入</span></div><button class="switch" disabled aria-label="继电器1开关"></button></article>
       <article class="control-card"><div><h3>蜂鸣器</h3><p>低电平触发 · 告警提示</p><span class="pending">待接入</span></div><button class="switch" disabled aria-label="蜂鸣器开关"></button></article>
       <article class="control-card"><div><h3>自动模式</h3><p>根据环境数据自动调节执行器</p><span class="pending">待接入</span></div><button class="switch" disabled aria-label="自动模式开关"></button></article>
       <article class="control-card range-card"><div class="range-head"><div><h3>灯带亮度</h3><p>当前由 BH1750 光照数据自动映射</p></div><b class="range-value" id="rangeValue">--%</b></div><input type="range" min="0" max="100" value="0" disabled></article>

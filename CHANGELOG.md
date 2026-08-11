@@ -53,6 +53,7 @@
 - English: Added a `relay` driver (PB12/PB13, active-low, manual by default) and relay/auto-mode display on the OLED system page. The ESP32 bridge gained `RELAY1/RELAY2 ON|OFF`, `RELAY`, `AUTO ON|OFF`, and `MANUAL` Bluetooth commands, forwarded as `CMD_APP_MSG` with a `CMD_STATUS_RSP` status reply, sharing the OTA mutex.
 - 中文：自动联动以继电器1为加湿器：AHT20 湿度 <40% 开启、≥45% 关闭（5% 回差防抖），复用 vAppTask 现有 2 秒采样周期，未新增任务。
 - English: In AUTO mode, relay 1 drives the humidifier: AHT20 humidity below 40% turns it on, 45% or above turns it off (5% hysteresis), reusing the existing 2-second sampling period in vAppTask without adding a task.
+- 注 / Note: 这是当时 PB12/PB13 引脚方案下的通道定义。引脚迁移到 PA2/PA3 后，当前映射已调整为 **Relay 1 = 灯带 VCC（`RELAY_LIGHT_CHANNEL`）、Relay 2 = 加湿器 VCC（`RELAY_HUMIDIFIER_CHANNEL`）**，蓝牙命令与自动联动均按新映射执行。
 - 验证 / Validation: ESP32 侧编译通过（RAM 19.9%、Flash 73.6%）。**STM32 侧与继电器实机联动尚未验证**——待 Windows 上 `pio run -e app` 编译烧录后用蓝牙命令与 OLED 系统页确认。 / The ESP32 target compiles (RAM 19.9%, Flash 73.6%). **The STM32 side and hardware relay action are not yet verified** — pending a Windows `pio run -e app` build/flash and confirmation via Bluetooth commands and the OLED system page.
 
 ### v0.12 — Local environment terminal / STM32 本地环境终端

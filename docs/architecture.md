@@ -130,7 +130,7 @@ The 2026-08-10 hardware checkpoint adds a local user interface without changing 
 | EC11 A/B | GPIO EXTI | PA6/PA7 | Full Gray-code x1 navigation |
 | Confirm button | GPIO input | PA1 | Enter/back action |
 | HC-SR501 | GPIO input | PB0 | Motion state after 30 s warm-up |
-| Relay 1/2 | GPIO output | PA2/PA3 | Humidifier (relay 1) and light (relay 2), active-low |
+| Relay 1/2 | GPIO output | PA2/PA3 | Light strip VCC (relay 1) and humidifier VCC (relay 2), active-low |
 | Active buzzer | GPIO output | PB1 | Alarm output, active-low |
 
 All I2C devices currently share the 100kHz I2C1 bus. `vAppTask` starts AHT20 and BMP280 conversions together, reads them after 90 ms, refreshes the environment data every 2 s, and polls BH1750 every 200 ms. The same 5..1000 lux range drives a smoothed inverse 160..1 brightness curve for the WS2812B strip, with a 16-level slew step and a 2-level deadband. Because the 15-LED GPIO frame requires a roughly 0.5ms critical section, the application transmits only when the smoothed brightness actually changes. The UI layer sends the same 16×4 character view to both the SSD1306 and the ST7789. The TFT renders directly over SPI without a framebuffer, and sensor values stay in integer/fixed-point form because STM32F103 has no hardware FPU.
