@@ -56,7 +56,7 @@ static const char WEB_OTA_PAGE[] = R"WEBOTA(
     .control-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
     .control-card{display:flex;align-items:center;justify-content:space-between;gap:18px;min-height:104px;padding:18px;border:1px solid var(--line);border-radius:17px;background:linear-gradient(145deg,var(--surface2),rgba(9,21,35,.95))}
     .control-card h3{margin:0 0 6px;font-size:14px}.control-card p{margin:0;color:var(--muted);font-size:11px;line-height:1.5}
-    .switch{position:relative;flex:none;width:46px;height:26px;border:0;border-radius:999px;background:#26384e;opacity:.55}.switch:after{content:"";position:absolute;top:4px;left:4px;width:18px;height:18px;border-radius:50%;background:#8a9ab0}
+    .switch{position:relative;flex:none;width:46px;height:26px;border:0;border-radius:999px;background:#26384e;cursor:pointer;transition:background .2s}.switch:after{content:"";position:absolute;top:4px;left:4px;width:18px;height:18px;border-radius:50%;background:#8a9ab0;transition:transform .2s,background .2s}.switch.on{background:var(--green)}.switch.on:after{transform:translateX(20px);background:#0c1b12}
     .range-card{grid-column:1/-1;display:block}.range-head{display:flex;justify-content:space-between;align-items:center}.range-value{color:var(--yellow);font-weight:800}input[type=range]{width:100%;margin:20px 0 2px;accent-color:var(--yellow);opacity:.55}
     .pending{display:inline-flex;margin-top:8px;padding:4px 7px;border-radius:7px;background:rgba(129,146,169,.1);color:#92a2b8;font-size:9px;font-weight:800;letter-spacing:.06em}
     .system-grid{display:grid;grid-template-columns:.7fr 1.3fr;gap:14px}.system-stack{display:grid;gap:14px}
@@ -127,12 +127,12 @@ static const char WEB_OTA_PAGE[] = R"WEBOTA(
   </section>
 
   <section class="page" id="control">
-    <div class="panel-title"><h2>本地设备控制</h2><span>后端协议接入后启用</span></div>
+    <div class="panel-title"><h2>本地设备控制</h2><span>通过 ESP32 → STM32 实时下发</span></div>
     <div class="control-grid">
-      <article class="control-card"><div><h3>加湿器</h3><p>继电器 2 · 自动湿度控制</p><span class="pending">待接入</span></div><button class="switch" disabled aria-label="加湿器开关"></button></article>
-      <article class="control-card"><div><h3>灯带电源</h3><p>继电器 1 · 通断 WS2812B VCC</p><span class="pending">待接入</span></div><button class="switch" disabled aria-label="继电器1开关"></button></article>
-      <article class="control-card"><div><h3>蜂鸣器</h3><p>低电平触发 · 告警提示</p><span class="pending">待接入</span></div><button class="switch" disabled aria-label="蜂鸣器开关"></button></article>
-      <article class="control-card"><div><h3>自动模式</h3><p>根据环境数据自动调节执行器</p><span class="pending">待接入</span></div><button class="switch" disabled aria-label="自动模式开关"></button></article>
+      <article class="control-card"><div><h3>加湿器</h3><p>继电器 2 · 自动湿度控制</p></div><button class="switch" data-ctl="relay2" aria-label="加湿器开关"></button></article>
+      <article class="control-card"><div><h3>灯带电源</h3><p>继电器 1 · 通断 WS2812B VCC</p></div><button class="switch" data-ctl="relay1" aria-label="继电器1开关"></button></article>
+      <article class="control-card"><div><h3>蜂鸣器</h3><p>低电平触发 · 告警提示</p></div><button class="switch" data-ctl="buzzer" aria-label="蜂鸣器开关"></button></article>
+      <article class="control-card"><div><h3>自动模式</h3><p>根据环境数据自动调节执行器</p></div><button class="switch" data-ctl="auto" aria-label="自动模式开关"></button></article>
       <article class="control-card range-card"><div class="range-head"><div><h3>灯带亮度</h3><p>当前由 BH1750 光照数据自动映射</p></div><b class="range-value" id="rangeValue">--%</b></div><input type="range" min="0" max="100" value="0" disabled></article>
     </div>
   </section>
@@ -191,10 +191,13 @@ static const char WEB_OTA_PAGE[] = R"WEBOTA(
   function setBusy(value){busy=value;start.disabled=value||!fileInput.files.length;fileInput.disabled=value;$('version').disabled=value}
   function setConnection(mode,text){$('connection').className='connection '+mode;$('connectionText').textContent=text;$('bridgeSummary').textContent=text;$('bridgeState').className='bridge-state '+(mode==='online'||mode==='busy'?'online':'');$('bridgeStateTitle').textContent=mode==='offline'?'ESP32 连接中断':'ESP32 Bridge 在线'}
   function setDevice(name,on,label){$(name+'State').textContent=label;$(name+'Dot').className='state-dot '+(on?'on':'')}
+  function setCtlSwitch(name,on){const el=document.querySelector('.switch[data-ctl="'+name+'"]');if(el)el.classList.toggle('on',!!on)}
+  function syncCtlSwitches(data){setCtlSwitch('relay1',!!data.relay1);setCtlSwitch('relay2',!!data.relay2);setCtlSwitch('buzzer',!!data.buzzer);setCtlSwitch('auto',!!data.auto_mode)}
   function paintSensors(data){
     if(!data.online){
       ['temperature','humidity','light','pressure'].forEach(id=>$(id).textContent='--');
       ['pir','relay1','relay2','led','buzzer'].forEach(id=>setDevice(id,false,'--'));
+      ['relay1','relay2','buzzer','auto'].forEach(name=>setCtlSwitch(name,false));
       $('ledDetail').textContent='WS2812B';$('rangeValue').textContent='--%';$('stm32Link').textContent='数据超时';$('modePill').textContent='DATA 中断';return;
     }
     const values={temperature:data.temperature,humidity:data.humidity,light:data.lux,pressure:data.pressure};
@@ -208,6 +211,7 @@ static const char WEB_OTA_PAGE[] = R"WEBOTA(
     const pirLabel=!data.pir_ready?'未就绪':!data.pir_warmed_up?'预热中':data.pir?'检测到人体':'无人';
     const ledPercent=data.led_percent??data.led_brightness??0;
     setDevice('pir',!!data.pir&&!!data.pir_warmed_up,pirLabel);setDevice('relay1',!!data.relay1,data.relay1?'开启':'关闭');setDevice('relay2',!!data.relay2,data.relay2?'开启':'关闭');setDevice('led',ledPercent>0,ledPercent+'%');setDevice('buzzer',!!data.buzzer,data.buzzer?'鸣响':'静音');
+    syncCtlSwitches(data);
     $('ledDetail').textContent='WS2812B · '+ledPercent+'%';$('rangeValue').textContent=ledPercent+'%';$('stm32Link').textContent='在线 · '+(data.age_ms??0)+'ms';$('lastUpdate').textContent=clock();$('modePill').textContent=data.auto_mode?'AUTO 自动':'MANUAL 手动';
   }
   function paintStatus(data){
@@ -220,6 +224,12 @@ static const char WEB_OTA_PAGE[] = R"WEBOTA(
   }
   async function refresh(){try{const r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw new Error();paintStatus(await r.json())}catch(e){setConnection('offline','ESP32 离线');$('otaStatusText').textContent='连接中断';$('otaSummary').textContent='离线'}}
   async function refreshSensors(){if(demo)return;try{const r=await fetch('/api/sensors',{cache:'no-store'});if(r.ok)paintSensors(await r.json());else $('stm32Link').textContent='API 异常'}catch(e){$('stm32Link').textContent='API 连接失败'}}
+  async function sendControl(name,on){const r=await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({[name]:on})});const data=await r.json();if(!r.ok||!data.ok)throw new Error(data.message||'控制失败');syncCtlSwitches(data)}
+  document.querySelectorAll('.switch[data-ctl]').forEach(btn=>btn.addEventListener('click',async()=>{
+    const name=btn.dataset.ctl,target=!btn.classList.contains('on');
+    if(demo){setCtlSwitch(name,target);return}
+    try{await sendControl(name,target)}catch(e){btn.classList.toggle('on',!target);alert('控制失败：'+(e.message||'请检查链路'))}
+  }));
 
   fileInput.addEventListener('change',()=>{
     const f=fileInput.files[0];if(!f){$('fileMeta').classList.remove('show');start.disabled=true;return}
