@@ -15,6 +15,7 @@
 │  │ BT SPP   │  │ WiFi HTTP│  │ OTA Orchestrator     │  │
 │  │ Server   │  │ Client   │  │ (download/stage/xfer)│  │
 │  └────┬─────┘  └────┬─────┘  └──────────┬───────────┘  │
+│  Sensor poll/cache → GET /api/sensors → Web dashboard   │
 │  SoftAP + Web OTA: STM32-OTA-Bridge / http://192.168.4.1 │
 │       └──────────────┴───────────────────┘              │
 │                         │ UART 115200                    │
@@ -95,6 +96,14 @@ Simple length-prefixed frames with standard IEEE CRC-32. Chunk data is at most 1
 Bluetooth SPP staging uses printable `FW` / `DATA` / `VERIFY` commands. Each Base64 `DATA` block includes its decoded offset and receives an ACK carrying the next expected offset, so a lost response can be retried without appending the block twice. This outer staging protocol is separate from the binary UART frame protocol between ESP32 and STM32.
 
 Web and Bluetooth transfers share a FreeRTOS mutex. The Web upload handler uses a fixed 1KB buffer and writes directly to SPIFFS, so the 54KB application image is never duplicated in ESP32 RAM.
+
+### 5. Realtime sensor snapshot path
+
+`vAppTask` publishes an 18-byte `SensorSnapshot_t` every 200ms into a shared fixed-size snapshot. It contains fixed-point environment readings, lux, PIR state, relay/buzzer/auto flags, and LED brightness. `vCommTask` copies it inside a short critical section when it receives `CMD_GET_SENSOR_SNAPSHOT (0x32)`, then replies with `CMD_SENSOR_SNAPSHOT_RSP (0x87)` using the normal CRC-protected UART frame.
+
+The ESP32 `sensor_poll` task queries once per second and writes the reply into a Mutex-protected cache. `GET /api/sensors` formats that cache as JSON without touching UART, so slow browsers cannot block the MCU link. Sensor polling, Bluetooth request/response commands, and OTA share one UART transaction mutex. During OTA, polling skips cycles; data older than 5 seconds is reported as offline.
+
+The browser polls `/api/sensors` once per second. WebSocket and historical storage remain separate future layers. See [web-realtime-dashboard.md](web-realtime-dashboard.md) for the payload, API fields, and verification steps.
 
 ## FreeRTOS Task Architecture
 

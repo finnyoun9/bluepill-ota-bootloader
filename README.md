@@ -2,7 +2,7 @@
 
 > STM32 Blue Pill + FreeRTOS + ESP32 | 自定义 Bootloader + OTA | 多传感器 + Web仪表盘 + MQTT上云
 
-基于 STM32F103C8T6 (Blue Pill) + FreeRTOS + ESP32 协处理器的**智能环境监测与联动控制系统**。当前已完成自定义 Bootloader、蓝牙 OTA、手机 Web OTA、STM32 本地环境终端，以及两路继电器、有源蜂鸣器和 BH1750→WS2812B 自动调光的实机闭环；远程实时仪表盘与 MQTT 属于后续扩展目标。
+基于 STM32F103C8T6 (Blue Pill) + FreeRTOS + ESP32 协处理器的**智能环境监测与联动控制系统**。当前已完成自定义 Bootloader、蓝牙 OTA、手机 Web OTA、STM32 本地环境终端、ESP32 实时 Web 仪表盘，以及两路继电器、有源蜂鸣器和 BH1750→WS2812B 自动调光的实机闭环；两端新版固件已烧录，实时传感器链路和 `GET /api/sensors` 已完成实机回归。MQTT 属于后续扩展目标。
 
 > 想快速回顾每次提交到底改了什么，可看双语 [CHANGELOG.md](CHANGELOG.md)。它会区分“已经实机验证”和“仍是设计/待验证”的内容。
 
@@ -55,15 +55,18 @@
 ### ESP32 (C++, ESP-IDF)
 - 蓝牙 Classic SPP 服务器（手机直连控制）
 - WiFi SoftAP + 手机 Web OTA（已实机验证）
+- STM32 传感器快照轮询 + `GET /api/sensors` 实时缓存接口（实机通过）
 - WiFi HTTP Client（远程 OTA 固件下载）
 - SPIFFS 固件缓存 + Application 向量表/CRC 校验
-- WebSocket、传感器 REST API、MQTT（后续规划）
+- WebSocket、MQTT（后续规划）
 
 ### 控制接口
 - **手机 Web OTA**: ESP32 内置响应式页面，iPhone 可直接上传 `.bin`
-- **Web 仪表盘**: 纯 HTML/CSS/JS SPA（后续规划）
+- **Web 仪表盘**: ESP32 内置纯 HTML/CSS/JS SPA，实时状态已接入；写控制与历史曲线待扩展
 - **蓝牙终端**: Windows/Android Classic SPP 文本命令（iPhone 不支持 SPP）
 - **Python 桌面**: `ota_sender.py` 固件上传 + `control_panel.py` 控制面板
+
+![实时 Web 仪表盘实机截图](docs/images/web-realtime-dashboard-live.png)
 
 ## 传感器进度
 
@@ -163,6 +166,9 @@ C:\Users\yyfxy\AppData\Local\Programs\Python\Python311\python.exe `
 # 手机 Web OTA：连接 ESP32 热点后访问
 # SSID: STM32-OTA-Bridge / Password: stm32ota
 浏览器打开 http://192.168.4.1
+
+# 查看 STM32 实时传感器与执行器快照
+curl.exe http://192.168.4.1/api/sensors
 ```
 
 ## 手机 Web OTA
@@ -172,7 +178,9 @@ C:\Users\yyfxy\AppData\Local\Programs\Python\Python311\python.exe `
 3. 选择 STM32 Application 的 `firmware.bin`，填写大于 0 的目标版本
 4. 点击“开始 OTA 升级”，等待页面显示“升级成功”
 
-页面通过 `POST /api/upload?version=<N>` 上传固件，ESP32 检查 54KB 大小上限、CRC-32、Cortex-M 初始栈和 Application Reset Vector；校验通过后由 `POST /api/start` 启动 UART OTA。`GET /api/status` 返回上传和写入进度。
+首页每 1 秒读取 `GET /api/sensors`，显示温湿度、气压、光照、PIR、两路继电器、蜂鸣器、自动模式和灯带亮度。ESP32 每 1 秒通过 UART 查询一次 STM32 的 18B 定点快照，缓存超过 5 秒未更新时页面显示数据超时。完整实现见 [docs/web-realtime-dashboard.md](docs/web-realtime-dashboard.md)。
+
+OTA 页通过 `POST /api/upload?version=<N>` 上传固件，ESP32 检查 54KB 大小上限、CRC-32、Cortex-M 初始栈和 Application Reset Vector；校验通过后由 `POST /api/start` 启动 UART OTA。`GET /api/status` 返回上传和写入进度。
 
 > Web OTA 只接受链接到 `0x08002000` 的 STM32 Application 镜像。Bootloader 或其他目标生成的 `.bin` 会被向量表检查拒绝。
 
@@ -198,7 +206,7 @@ C:\Users\yyfxy\AppData\Local\Programs\Python\Python311\python.exe `
 | `MANUAL` | 关闭自动联动（等价 `AUTO OFF`） |
 | `BUZZER ON/OFF` | 控制 PB1 低电平触发的有源蜂鸣器 |
 
-> 传感器查询/舵机/雾化片等控制命令仍属于后续规划；继电器手动/自动控制已实现。
+> Web 传感器状态查询已实现；Web 写控制、舵机和雾化片仍属于后续规划。继电器手动/自动控制目前通过蓝牙命令实现。
 
 > `tools/bridge_ota.py` 会自动计算 `<size>` 和 CRC，把固件编码为带偏移量 ACK 的 Base64 分块，执行 `VERIFY` 后再发送 `SEND`。不要在普通串口终端里手工粘贴二进制 `.bin`。
 
@@ -265,7 +273,7 @@ bluepill-ota/
 - WS2812B 使用 DP100 5V 经 1N4001 降到约 4.2V，数据线为 `PB5 → DIN`，灯带与 STM32 共地。入口串联 220~470Ω 数据电阻仍建议保留，但本次故障并不是缺少该电阻。
 - 原 SPI1 4MHz/5-bit 编码在 `DIN` 上测得的脉宽和数据都合理，但第一颗灯珠 `DOUT` 没有转发，灯带实际未接收。换回 64MHz 下经过实机验证的 GPIO bit-bang 后，第一颗 `DOUT` 捕获到后 14 颗共 336 bit、42 字节的有效帧，才算真正闭环。
 - 最终逻辑：BH1750 每 200ms 更新目标亮度，`≤5 lux → 160/255`、`≥1000 lux → 1/255`，中间反向线性映射；每次最多变化 16 级，2 级以内视为传感器抖动，且仅亮度确实变化时发送灯带帧。
-- 当前 Application 构建占用：RAM 17,780 B（86.8%），Flash 30,892 B（47.1%）。完整波形证据和排障结论见 [docs/build-notes.md](docs/build-notes.md)。
+- 加入 Web 实时快照后的 Application 构建占用：RAM 17,796 B（86.9%），Flash 31,276 B（47.7%）。完整波形证据和排障结论见 [docs/build-notes.md](docs/build-notes.md)。
 
 ## 关键约束
 
