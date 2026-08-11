@@ -12,8 +12,8 @@
 - 15 颗 WS2812B 已在 PB5 上通过 64MHz 时钟相关的 GPIO 位操作驱动完成实机验证；BH1750 采用平滑反向亮度曲线，只有亮度变化时才发送新帧。
 - The STM32 application now provides a hardware-verified local environment terminal with an SSD1306 menu, EC11 navigation, BH1750 light sensing, HC-SR501 motion sensing, and AHT20/BMP280 temperature-humidity-pressure readings.
 - STM32 Application 已形成实机验证的本地环境终端：SSD1306 菜单、EC11 导航、BH1750 光照、HC-SR501 人体感应，以及 AHT20/BMP280 温湿度气压采集均已跑通。
-- All four I2C devices share I2C1 on `PB6/PB7 @ 100kHz`; the current application uses 17,796 B RAM (86.9%) and 31,276 B Flash (47.7%).
-- 四个 I2C 设备当前共用 `PB6/PB7 @ 100kHz` 的 I2C1；Application 占用 RAM 17,796 B（86.9%）、Flash 31,276 B（47.7%）。
+- All four I2C devices share I2C1 on `PB6/PB7 @ 100kHz`; the current application uses 17,796 B RAM (86.9%) and 31,348 B Flash (47.8%).
+- 四个 I2C 设备当前共用 `PB6/PB7 @ 100kHz` 的 I2C1；Application 占用 RAM 17,796 B（86.9%）、Flash 31,348 B（47.8%）。
 - Phone-driven Web OTA is hardware-verified: an iPhone connected directly to the ESP32 SoftAP, uploaded the STM32 application, and completed the update without a PC-side sender.
 - 手机 Web OTA 已通过实机验证：iPhone 直连 ESP32 SoftAP、上传 STM32 Application，并在不使用电脑发包工具的情况下完成升级。
 - The Web update moved the target from firmware version 1 to 2; a follow-up Bluetooth `VERSION` query returned `FW Version: 2`.
@@ -43,7 +43,7 @@
 - English: Added `CMD_GET_SENSOR_SNAPSHOT (0x32)` / `CMD_SENSOR_SNAPSHOT_RSP (0x87)` and an 18-byte fixed-point snapshot. STM32 publishes it from the existing `vAppTask`, without another task or floating-point formatting.
 - 中文：ESP32 每秒查询并缓存快照，新增 `GET /api/sensors`；Web 首页按秒刷新真实传感器和执行器状态，缓存超过 5 秒即显示数据超时。OTA、蓝牙命令与轮询共享 UART 事务锁。
 - English: The ESP32 polls and caches the snapshot once per second and exposes `GET /api/sensors`. The Web home page refreshes real sensor and actuator state every second and reports a timeout after 5 seconds; OTA, Bluetooth commands, and polling share one UART transaction lock.
-- 验证 / Validation: protocol smoke test and both firmware builds pass. Application: RAM 17,796 B (86.9%), Flash 31,276 B (47.7%). ESP32: RAM 65,184 B (19.9%), Flash 1,370,061 B (74.7%). Both images are flashed; repeated LAN API reads stayed online with sub-second cache age, and the embedded dashboard displayed live sensor values (latest snapshot 24.9°C / 51.9%RH / 81 lux at ~345ms cache age). / 协议烟测和两端构建通过；两端固件均已烧录，局域网 API 连续读取保持在线且缓存年龄低于 1 秒，板载仪表盘能显示实时传感器值（最新快照 24.9°C / 51.9%RH / 81 lux，缓存约 345ms）。
+- 验证 / Validation: protocol smoke test and both firmware builds pass. Application: RAM 17,796 B (86.9%), Flash 31,348 B (47.8%). ESP32: RAM 65,184 B (19.9%), Flash 1,370,061 B (74.7%). Both images are flashed; repeated LAN API reads stayed online with sub-second cache age, and the embedded dashboard displayed live sensor values (latest snapshot 24.9°C / 51.9%RH / 81 lux at ~345ms cache age). / 协议烟测和两端构建通过；两端固件均已烧录，局域网 API 连续读取保持在线且缓存年龄低于 1 秒，板载仪表盘能显示实时传感器值（最新快照 24.9°C / 51.9%RH / 81 lux，缓存约 345ms）。
 
 ### v0.13 — Two-channel relay control / 两路继电器控制
 
