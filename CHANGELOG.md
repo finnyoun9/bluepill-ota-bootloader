@@ -6,6 +6,8 @@
 
 ## Current status / 当前状态
 
+- Two-channel relay control (PB12/PB13) is implemented: Bluetooth `RELAY1/RELAY2 ON|OFF`, `RELAY`, `AUTO ON|OFF`, and `MANUAL` commands, plus an auto-humidifier linkage with hysteresis. **Code is merged but not yet hardware-verified** — pending a Windows build/flash test.
+- 两路继电器控制（PB12/PB13）已实现：蓝牙 `RELAY1/RELAY2 ON|OFF`、`RELAY`、`AUTO ON|OFF`、`MANUAL` 命令，以及带回差的自动加湿联动。**代码已合入但尚未实机验证**，待 Windows 侧编译烧录确认。
 - The STM32 application now provides a hardware-verified local environment terminal with an SSD1306 menu, EC11 navigation, BH1750 light sensing, HC-SR501 motion sensing, and AHT20/BMP280 temperature-humidity-pressure readings.
 - STM32 Application 已形成实机验证的本地环境终端：SSD1306 菜单、EC11 导航、BH1750 光照、HC-SR501 人体感应，以及 AHT20/BMP280 温湿度气压采集均已跑通。
 - All four I2C devices share I2C1 on `PB6/PB7 @ 100kHz`; the current application uses 17,676 B RAM (86.3%) and 25,200 B Flash (38.5%).
@@ -22,6 +24,16 @@
 - 三端固件均可构建；协议烟测同时覆盖经典 CRC 向量和全字节向量；当前硬件接线在 USART1 9600 baud 下稳定工作。
 
 ## Milestones / 里程碑
+
+### v0.13 — Two-channel relay control / 两路继电器控制
+
+**Commit:** [`9edc875`](https://github.com/finnyoun9/bluepill-ota-bootloader/commit/9edc875)
+
+- 中文：新增 `relay` 驱动（PB12/PB13，低电平触发，默认手动模式），并在 OLED 系统页显示两路状态与自动模式；ESP32 侧新增 `RELAY1/RELAY2 ON|OFF`、`RELAY`、`AUTO ON|OFF`、`MANUAL` 蓝牙命令，经 `CMD_APP_MSG` 转发、`CMD_STATUS_RSP` 回读状态，与 Web OTA 共用互斥锁。
+- English: Added a `relay` driver (PB12/PB13, active-low, manual by default) and relay/auto-mode display on the OLED system page. The ESP32 bridge gained `RELAY1/RELAY2 ON|OFF`, `RELAY`, `AUTO ON|OFF`, and `MANUAL` Bluetooth commands, forwarded as `CMD_APP_MSG` with a `CMD_STATUS_RSP` status reply, sharing the OTA mutex.
+- 中文：自动联动以继电器1为加湿器：AHT20 湿度 <40% 开启、≥45% 关闭（5% 回差防抖），复用 vAppTask 现有 2 秒采样周期，未新增任务。
+- English: In AUTO mode, relay 1 drives the humidifier: AHT20 humidity below 40% turns it on, 45% or above turns it off (5% hysteresis), reusing the existing 2-second sampling period in vAppTask without adding a task.
+- 验证 / Validation: ESP32 侧编译通过（RAM 19.9%、Flash 73.6%）。**STM32 侧与继电器实机联动尚未验证**——待 Windows 上 `pio run -e app` 编译烧录后用蓝牙命令与 OLED 系统页确认。 / The ESP32 target compiles (RAM 19.9%, Flash 73.6%). **The STM32 side and hardware relay action are not yet verified** — pending a Windows `pio run -e app` build/flash and confirmation via Bluetooth commands and the OLED system page.
 
 ### v0.12 — Local environment terminal / STM32 本地环境终端
 

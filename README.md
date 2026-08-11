@@ -2,7 +2,7 @@
 
 > STM32 Blue Pill + FreeRTOS + ESP32 | 自定义 Bootloader + OTA | 多传感器 + Web仪表盘 + MQTT上云
 
-基于 STM32F103C8T6 (Blue Pill) + FreeRTOS + ESP32 协处理器的**智能环境监测与联动控制系统**。当前已完成自定义 Bootloader、蓝牙 OTA、手机 Web OTA，以及 STM32 本地环境终端；传感器→决策→执行器、远程实时仪表盘与 MQTT 属于后续扩展目标。
+基于 STM32F103C8T6 (Blue Pill) + FreeRTOS + ESP32 协处理器的**智能环境监测与联动控制系统**。当前已完成自定义 Bootloader、蓝牙 OTA、手机 Web OTA、STM32 本地环境终端，以及两路继电器控制（蓝牙命令 + 自动加湿联动，待实机验证）；远程实时仪表盘与 MQTT 属于后续扩展目标。
 
 > 想快速回顾每次提交到底改了什么，可看双语 [CHANGELOG.md](CHANGELOG.md)。它会区分“已经实机验证”和“仍是设计/待验证”的内容。
 
