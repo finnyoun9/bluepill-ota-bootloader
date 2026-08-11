@@ -740,8 +740,71 @@ static void bt_recv_task(void *pv) {
                     vTaskDelay(pdMS_TO_TICKS(100));
                     esp_restart();
 
+                } else if (strncmp(cmd, "RELAY", 5) == 0 || strncmp(cmd, "relay", 5) == 0 ||
+                           strncmp(cmd, "AUTO", 4) == 0 || strncmp(cmd, "auto", 4) == 0 ||
+                           strncmp(cmd, "MANUAL", 6) == 0 || strncmp(cmd, "manual", 6) == 0) {
+                    /* Relay control. Commands are canonicalized and passed to
+                     * the STM32 as CMD_APP_MSG text; the reply is CMD_STATUS_RSP
+                     * with {relay1, relay2, auto_mode}. The mutex keeps this
+                     * from interleaving with a Web OTA transfer. */
+                    char msg[32];
+                    bool recognized = true;
+
+                    if (strncmp(cmd, "MANUAL", 6) == 0 || strncmp(cmd, "manual", 6) == 0) {
+                        strcpy(msg, "AUTO OFF");
+                    } else if (strncmp(cmd, "AUTO", 4) == 0 || strncmp(cmd, "auto", 4) == 0) {
+                        bool on = !(strstr(cmd + 4, "OFF") != NULL ||
+                                    strstr(cmd + 4, "off") != NULL);
+                        snprintf(msg, sizeof(msg), "AUTO %s", on ? "ON" : "OFF");
+                    } else if (cmd[5] == '1' || cmd[5] == '2') {
+                        bool on;
+                        if (strstr(cmd + 6, "ON") != NULL ||
+                            strstr(cmd + 6, "on") != NULL) {
+                            on = true;
+                        } else if (strstr(cmd + 6, "OFF") != NULL ||
+                                   strstr(cmd + 6, "off") != NULL) {
+                            on = false;
+                        } else {
+                            recognized = false;
+                        }
+                        if (recognized) {
+                            snprintf(msg, sizeof(msg), "RELAY%c %s", cmd[5],
+                                     on ? "ON" : "OFF");
+                        }
+                    } else if (cmd[5] == '\0' || cmd[5] == ' ') {
+                        strcpy(msg, "RELAY");
+                    } else {
+                        recognized = false;
+                    }
+
+                    if (!recognized) {
+                        bt_spp_print("RELAY usage: RELAY1 ON|OFF, RELAY2 ON|OFF, RELAY, AUTO ON|OFF, MANUAL\r\n");
+                    } else if (xSemaphoreTake(g_ota_mutex, 0) != pdTRUE) {
+                        bt_spp_print("RELAY: OTA transfer busy, retry later\r\n");
+                    } else {
+                        ProtoFrame_t resp;
+                        bool ok = stm32_send_frame(CMD_APP_MSG,
+                                                   (const uint8_t *)msg,
+                                                   strlen(msg)) &&
+                                  stm32_wait_cmd(CMD_STATUS_RSP, &resp, 2000) &&
+                                  resp.len >= 3;
+                        xSemaphoreGive(g_ota_mutex);
+
+                        if (ok) {
+                            char rbuf[80];
+                            snprintf(rbuf, sizeof(rbuf),
+                                     "RELAY1: %s, RELAY2: %s, AUTO: %s\r\n",
+                                     resp.payload[0] ? "ON" : "OFF",
+                                     resp.payload[1] ? "ON" : "OFF",
+                                     resp.payload[2] ? "ON" : "OFF");
+                            bt_spp_print(rbuf);
+                        } else {
+                            bt_spp_print("RELAY: no response from STM32\r\n");
+                        }
+                    }
+
                 } else {
-                    bt_spp_print("Unknown command. Commands: OTA <url>, FW <ver>,<size>,<crc>, DATA <offset>,<base64>, VERIFY, SEND, WIFI <ssid>,<pass>, VERSION, STATUS, RESET\r\n");
+                    bt_spp_print("Unknown command. Commands: OTA <url>, FW <ver>,<size>,<crc>, DATA <offset>,<base64>, VERIFY, SEND, WIFI <ssid>,<pass>, VERSION, STATUS, RESET, RELAY1 ON|OFF, RELAY2 ON|OFF, RELAY, AUTO ON|OFF, MANUAL\r\n");
                 }
             } else {
                 bt_spp_print("FW: non-text data rejected; use Base64 DATA blocks\r\n");
