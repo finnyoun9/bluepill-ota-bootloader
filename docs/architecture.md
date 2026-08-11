@@ -115,6 +115,7 @@ The 2026-08-10 hardware checkpoint adds a local user interface without changing 
 | EC11 A/B | GPIO EXTI | PA6/PA7 | Full Gray-code x1 navigation |
 | Confirm button | GPIO input | PA1 | Enter/back action |
 | HC-SR501 | GPIO input | PB0 | Motion state after 30 s warm-up |
+| Relay 1/2 | GPIO output | PB12/PB13 | Humidifier (relay 1) and light (relay 2), active-low |
 
 All I2C devices currently share the 100kHz I2C1 bus. `vAppTask` starts AHT20 and BMP280 conversions together, reads them after 90 ms, refreshes the environment data every 2 s, polls BH1750 every 200 ms, and only redraws the active OLED page. Sensor values stay in integer/fixed-point form because STM32F103 has no hardware FPU.
 

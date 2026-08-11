@@ -32,6 +32,7 @@
 #include "environment_sensor.h"
 #include "oled.h"
 #include "pir_sensor.h"
+#include "relay.h"
 #include "rotary_encoder.h"
 
 /*---------------------------------------------------------------------------
@@ -54,6 +55,7 @@ static bool                 g_bh1750_ready;
 static bool                 g_environment_ready;
 static bool                 g_encoder_ready;
 static bool                 g_pir_ready;
+static bool                 g_relay_ready;
 
 /* The CMSIS startup file copies .data only. ota_config.c places the short
  * Flash erase/program wrappers in .ramfunc, so initialize that section before
@@ -370,7 +372,11 @@ static void ui_render_system(void) {
     } else {
         oled_show_string(2U, 5U, "N/A ");
     }
-    oled_show_string(3U, 1U, "UART: 115200");
+    oled_show_string(2U, 9U, relay_auto_enabled() ? "A:ON " : "A:OFF");
+    oled_show_string(3U, 1U, "R1:");
+    oled_show_string(3U, 4U, relay_get_state(0U) ? "ON " : "OFF");
+    oled_show_string(3U, 8U, "R2:");
+    oled_show_string(3U, 11U, relay_get_state(1U) ? "ON " : "OFF");
     oled_show_string(4U, 1U, "PRESS TO BACK");
 }
 
@@ -410,6 +416,51 @@ static void ui_render_screen(UiScreen_t screen, uint8_t selected,
     }
 }
 
+/*---------------------------------------------------------------------------
+ * Relay control commands (forwarded from ESP32 via CMD_APP_MSG)
+ *
+ * Canonical forms sent by the bridge:
+ *   RELAY1 ON | RELAY1 OFF | RELAY2 ON | RELAY2 OFF | RELAY | AUTO ON | AUTO OFF
+ * Replies with CMD_STATUS_RSP {relay1, relay2, auto_mode}.
+ *---------------------------------------------------------------------------*/
+
+#define RELAY_AUTO_HUM_ON   4000U  /* %RH x100: start humidifier below this */
+#define RELAY_AUTO_HUM_OFF  4500U  /* %RH x100: stop humidifier above this */
+
+static void handle_control_command(const char *cmd) {
+    bool handled = false;
+
+    if (strncmp(cmd, "RELAY", 5U) == 0) {
+        uint8_t channel = 0xFFU;  /* bare "RELAY" -> query only */
+        if (cmd[5] == '1') {
+            channel = 0U;
+        } else if (cmd[5] == '2') {
+            channel = 1U;
+        }
+
+        if (channel != 0xFFU) {
+            if (strstr(cmd + 6, "ON") != NULL) {
+                relay_set(channel, true);
+            } else if (strstr(cmd + 6, "OFF") != NULL) {
+                relay_set(channel, false);
+            }
+        }
+        handled = true;
+    } else if (strncmp(cmd, "AUTO", 4U) == 0) {
+        relay_set_auto(strstr(cmd + 4, "OFF") == NULL);
+        handled = true;
+    }
+
+    if (handled) {
+        uint8_t status[3] = {
+            relay_get_state(0U) ? 1U : 0U,
+            relay_get_state(1U) ? 1U : 0U,
+            relay_auto_enabled() ? 1U : 0U
+        };
+        cmd_handler_send_frame(CMD_STATUS_RSP, status, sizeof(status));
+    }
+}
+
 static void vAppTask(void *pvParameters) {
     (void)pvParameters;
     uint8_t data[64];
@@ -434,12 +485,13 @@ static void vAppTask(void *pvParameters) {
         ui_render_menu(selected);
     }
 
+    bool relay_ui_shown[RELAY_CHANNELS] = { false, false };
+    bool auto_ui_shown = false;
+
     for (;;) {
-        /* Receive application data from ESP32 (BT serial bridge) */
+        /* Receive control commands from ESP32 (BT serial bridge) */
         if (xQueueReceive(g_data_queue, data, pdMS_TO_TICKS(5)) == pdPASS) {
-            /* TODO: Process application-specific data
-             * For now, this is a placeholder for the user's logic.
-             * Examples: sensor readings, relay control, data logging, etc. */
+            handle_control_command((const char *)data);
         }
 
         const int16_t encoder_delta =
@@ -500,6 +552,19 @@ static void vAppTask(void *pvParameters) {
             if (g_oled_ready && screen == UI_SCREEN_ENVIRONMENT) {
                 ui_render_environment(&environment, environment_valid);
             }
+
+            /* Auto linkage: humidifier (relay 1) with hysteresis. */
+            if (g_relay_ready && relay_auto_enabled() && environment_valid) {
+                const uint32_t humidity =
+                    (uint32_t)environment.humidity_centi_percent;
+                if (relay_get_state(0U)) {
+                    if (humidity >= RELAY_AUTO_HUM_OFF) {
+                        relay_set(0U, false);
+                    }
+                } else if (humidity < RELAY_AUTO_HUM_ON) {
+                    relay_set(0U, true);
+                }
+            }
         } else if (!environment_pending &&
                    (now - last_environment_start) >=
                        pdMS_TO_TICKS(ENV_SAMPLE_MS)) {
@@ -526,6 +591,24 @@ static void vAppTask(void *pvParameters) {
             pir_warmed_up = current_pir_warmed_up;
             if (g_oled_ready && screen == UI_SCREEN_MOTION) {
                 ui_render_motion(motion_detected, pir_warmed_up);
+            }
+        }
+
+        /* Keep the relay states on the SYSTEM page fresh. */
+        if (g_relay_ready && screen == UI_SCREEN_SYSTEM) {
+            bool relay_changed = false;
+            for (uint8_t i = 0U; i < RELAY_CHANNELS; i++) {
+                if (relay_ui_shown[i] != relay_get_state(i)) {
+                    relay_ui_shown[i] = relay_get_state(i);
+                    relay_changed = true;
+                }
+            }
+            if (auto_ui_shown != relay_auto_enabled()) {
+                auto_ui_shown = relay_auto_enabled();
+                relay_changed = true;
+            }
+            if (relay_changed && g_oled_ready) {
+                ui_render_system();
             }
         }
     }
@@ -629,7 +712,11 @@ void cmd_handler_dispatch(const ProtoFrame_t *f) {
 
     case CMD_APP_MSG:
         if (f->len > 0 && f->len <= 64) {
-            xQueueSend(g_data_queue, f->payload, 0);
+            /* Queue items are fixed-size; zero-fill the tail so the text
+             * command is NUL-terminated for the parser in vAppTask. */
+            uint8_t msg[64] = {0};
+            memcpy(msg, f->payload, f->len);
+            xQueueSend(g_data_queue, msg, 0);
         }
         break;
 
@@ -689,6 +776,7 @@ int main(void) {
     }
     g_encoder_ready = rotary_encoder_init();
     g_pir_ready = pir_sensor_init();
+    g_relay_ready = relay_init();
 
     /* Create FreeRTOS primitives and tasks */
     app_tasks_init();
