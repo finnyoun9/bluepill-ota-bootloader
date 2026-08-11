@@ -1,0 +1,13 @@
+$date Mon Aug 10 21:07:11 2026 $end
+$version libsigrok 0.6.0-git-883c2ac $end
+$comment
+  Acquisition with 1/8 channels at 1 MHz
+$end
+$timescale 1 us $end
+$scope module libsigrok $end
+$var wire 1 ! D0 $end
+$upscope $end
+$enddefinitions $end
+
+#0  0!
+#1500000

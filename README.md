@@ -2,7 +2,7 @@
 
 > STM32 Blue Pill + FreeRTOS + ESP32 | 自定义 Bootloader + OTA | 多传感器 + Web仪表盘 + MQTT上云
 
-基于 STM32F103C8T6 (Blue Pill) + FreeRTOS + ESP32 协处理器的**智能环境监测与联动控制系统**。当前已完成自定义 Bootloader、蓝牙 OTA、手机 Web OTA、STM32 本地环境终端，以及两路继电器控制（蓝牙命令 + 自动加湿联动，待实机验证）；远程实时仪表盘与 MQTT 属于后续扩展目标。
+基于 STM32F103C8T6 (Blue Pill) + FreeRTOS + ESP32 协处理器的**智能环境监测与联动控制系统**。当前已完成自定义 Bootloader、蓝牙 OTA、手机 Web OTA、STM32 本地环境终端，以及两路继电器、有源蜂鸣器和 BH1750→WS2812B 自动调光的实机闭环；远程实时仪表盘与 MQTT 属于后续扩展目标。
 
 > 想快速回顾每次提交到底改了什么，可看双语 [CHANGELOG.md](CHANGELOG.md)。它会区分“已经实机验证”和“仍是设计/待验证”的内容。
 
@@ -41,6 +41,7 @@
 - **当前外设**:
   - I2C1 100kHz 多设备总线：SSD1306、BH1750、AHT20、BMP280
   - GPIO/EXTI：EC11 四状态解码、独立确认按键、HC-SR501 输入
+  - GPIO 输出：PA2/PA3 两路低电平触发继电器、PB1 低电平触发蜂鸣器、PB5 WS2812B 位操作输出
 - **后续规划协议**:
   - I2C2（MPU6050、VL53L0X）
   - UART（双串口：ESP32 协议 + 调试日志）
@@ -71,6 +72,8 @@
 | AHT20 + BMP280 组合板 | I2C1 | 温度、湿度、气压 | 0x38 + 0x76/0x77 | 实机通过 |
 | BH1750 | I2C1 | 光照度 | 0x23 | 实机通过 |
 | SSD1306 OLED | I2C1 | 本地菜单与数据显示 | 0x3C | 实机通过 |
+| GMT020-02 TFT | SPI2 | 240×320 彩色镜像界面 | ST7789V | 驱动已完成，待实机验证 |
+| 15× WS2812B | GPIO bit-bang | BH1750 反向联动白光照明 | PB5 | 实机通过（DOUT 验证） |
 | HC-SR501 | GPIO | 人体红外 | PB0 | 实机通过 |
 | EC11 旋转编码器 | GPIO EXTI + GPIO | 菜单上下/确认 | PA6/PA7 + PA1 | 实机通过 |
 | MPU6050 | I2C2（规划） | 6轴姿态 | 0x68 | 待接入 |
@@ -83,10 +86,10 @@
 
 | 模块 | 控制方式 | 联动场景 | 状态 |
 |------|---------|---------|------|
-| 2路继电器 | GPIO OUT | 继电器1=加湿器，继电器2=灯光 | 已实现，待实机验证 |
+| 2路继电器 | GPIO OUT | 继电器1=加湿器，继电器2=灯光 | 实机通过 |
 | 超声波雾化片 | GPIO OUT | 湿度<40%自动加湿 | 待接入 |
 | SG90 舵机 | PWM 50Hz | 百叶窗/阀门角度 | 待接入 |
-| 有源蜂鸣器 | GPIO OUT | 烟雾/高温告警 | 待接入 |
+| 有源蜂鸣器 | GPIO OUT | 手动控制；烟雾/高温联动待接入 | 实机通过 |
 
 ## Flash 内存布局
 
@@ -108,12 +111,16 @@ PA10 (RX) ◄──────────── GPIO17 (TX)
 GND       ─────────────── GND
 
 PB6/PB7  (I2C1 SCL/SDA) ─── AHT20+BMP280 + BH1750 + SSD1306
+PB13/PB15 (SPI2 SCK/MOSI) ── GMT020-02 SCL/SDA
+PB12/PB14/PA8 (GPIO OUT) ─── GMT020-02 CS/DC/RST
+PB5      (GPIO bit-bang) ───── WS2812B DIN
 PA6/PA7  (GPIO EXTI) ─────── EC11 A/B
 PA1      (GPIO IN) ───────── EC11 确认按键
 PB0      (GPIO IN) ───────── HC-SR501 PIR
 PB10/PB11 (I2C2，规划) ───── MPU6050 + VL53L0X
-PB12     (GPIO OUT) ──────── 继电器1（加湿器，低电平触发）
-PB13     (GPIO OUT) ──────── 继电器2（灯光，低电平触发）
+PA2      (GPIO OUT) ──────── 继电器1（加湿器，低电平触发）
+PA3      (GPIO OUT) ──────── 继电器2（灯光，低电平触发）
+PB1      (GPIO OUT) ──────── 有源蜂鸣器（低电平触发）
 PA0      (TIM2_CH1) ──────── SG90 舵机
 PA5      (ADC) ───────────── MQ-2 烟雾 (经1k/2k分压)
 ```
@@ -189,6 +196,7 @@ C:\Users\yyfxy\AppData\Local\Programs\Python\Python311\python.exe `
 | `RELAY` | 查询两路继电器状态与自动模式 |
 | `AUTO ON/OFF` | 开启/关闭自动联动：湿度 <40% 自动开加湿器，≥45% 关闭（带回差） |
 | `MANUAL` | 关闭自动联动（等价 `AUTO OFF`） |
+| `BUZZER ON/OFF` | 控制 PB1 低电平触发的有源蜂鸣器 |
 
 > 传感器查询/舵机/雾化片等控制命令仍属于后续规划；继电器手动/自动控制已实现。
 
@@ -231,7 +239,7 @@ bluepill-ota/
 - **蓝牙组件用 sdkconfig.defaults 开启**（`-D CONFIG_BT_*` 编译宏对 ESP-IDF 无效）
 - **共享协议跨平台**：`shared/protocol.c` 已 C/C++ 兼容；ESP32 端镜像为 `src/protocol.cpp` 编译
 - **国内网络编译 ESP32 需代理**：`$env:HTTPS_PROXY='http://127.0.0.1:7897'; pio run -d esp32-comm-bridge`
-- Application 使用 8MHz HSE→PLL×8 的 64MHz 时钟；当前 STM32↔ESP32 链路统一为 9600 baud
+- Application 使用 8MHz HSE→PLL×8 的 64MHz 时钟；当时初次联调使用 9600 baud，当前 STM32↔ESP32 链路已统一为 115200 baud
 
 ## 硬件 OTA 闭环验证（2026-08-09）
 
@@ -250,6 +258,14 @@ bluepill-ota/
 - AHT20/BMP280 已显示温度、相对湿度和气压；湿度使用定点数并显示为 `61.0% RH`，未引入软件浮点。
 - HC-SR501 支持 30 秒预热状态和 HIGH/LOW 检测；BH1750 光照值可周期刷新。
 - Application 构建占用：RAM 17,676 B（86.3%），Flash 25,200 B（38.5%）；后续扩展需优先关注 RAM 余量。
+
+## 执行器与 WS2812B 联调验证（2026-08-11）
+
+- 两路低电平触发继电器已改到 `PA2/PA3`，有源蜂鸣器接 `PB1`；供电、共地、手动命令和继电器触点动作均已实机确认。
+- WS2812B 使用 DP100 5V 经 1N4001 降到约 4.2V，数据线为 `PB5 → DIN`，灯带与 STM32 共地。入口串联 220~470Ω 数据电阻仍建议保留，但本次故障并不是缺少该电阻。
+- 原 SPI1 4MHz/5-bit 编码在 `DIN` 上测得的脉宽和数据都合理，但第一颗灯珠 `DOUT` 没有转发，灯带实际未接收。换回 64MHz 下经过实机验证的 GPIO bit-bang 后，第一颗 `DOUT` 捕获到后 14 颗共 336 bit、42 字节的有效帧，才算真正闭环。
+- 最终逻辑：BH1750 每 200ms 更新目标亮度，`≤5 lux → 160/255`、`≥1000 lux → 1/255`，中间反向线性映射；每次最多变化 16 级，2 级以内视为传感器抖动，且仅亮度确实变化时发送灯带帧。
+- 当前 Application 构建占用：RAM 17,780 B（86.8%），Flash 30,892 B（47.1%）。完整波形证据和排障结论见 [docs/build-notes.md](docs/build-notes.md)。
 
 ## 关键约束
 

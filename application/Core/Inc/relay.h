@@ -1,6 +1,6 @@
 /**
  * @file    relay.h
- * @brief   Two-channel relay driver (PB12/PB13).
+ * @brief   Two-channel active-low relay driver (PA2/PA3).
  */
 
 #ifndef RELAY_H

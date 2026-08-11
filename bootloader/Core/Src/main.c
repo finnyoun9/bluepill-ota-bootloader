@@ -8,9 +8,8 @@
  *
  * Boot decision flow:
  *   1. Check config area for BOOT_MODE_OTA flag
- *   2. Check BOOT0 pin (PB0) for forced bootloader entry
- *   3. Wait OTA_WINDOW_MS for CMD_OTA_BEGIN from ESP32
- *   4. If none of the above → jump to application
+ *   2. Wait OTA_WINDOW_MS for CMD_OTA_BEGIN from ESP32
+ *   3. If neither condition applies → jump to application
  */
 
 #include "bootloader.h"
@@ -25,9 +24,6 @@
 
 #define LED_PORT                GPIOC
 #define LED_PIN                 GPIO_PIN_13    /* PC13 — onboard LED (active low) */
-
-#define BOOT0_PORT              GPIOB
-#define BOOT0_PIN               GPIO_PIN_0     /* PB0 — force-bootloader jumper */
 
 #define USART_BAUD              115200U
 
@@ -117,7 +113,6 @@ static void system_init(void) {
 
     SystemClock_Config();
 
-    __HAL_RCC_GPIOB_CLK_ENABLE();
     __HAL_RCC_GPIOC_CLK_ENABLE();
     __HAL_RCC_USART1_CLK_ENABLE();
 
@@ -130,11 +125,6 @@ static void system_init(void) {
     HAL_GPIO_Init(LED_PORT, &gpio);
     led_off();
 
-    /* BOOT0 pin PB0 — input with pull-up */
-    gpio.Pin  = BOOT0_PIN;
-    gpio.Mode = GPIO_MODE_INPUT;
-    gpio.Pull = GPIO_PULLUP;
-    HAL_GPIO_Init(BOOT0_PORT, &gpio);
 }
 
 /*---------------------------------------------------------------------------
@@ -560,17 +550,10 @@ void bootloader_run(void) {
     BootConfig_t cfg;
     bool cfg_valid = ota_config_read(&cfg);
 
-    /* 2. Check BOOT0 pin (PB0 low = force bootloader) */
-    bool boot0_asserted = (HAL_GPIO_ReadPin(BOOT0_PORT, BOOT0_PIN) == GPIO_PIN_RESET);
-
     if (cfg_valid && cfg.boot_mode == BOOT_MODE_OTA) {
         /* Application requested OTA — enter OTA mode with a longer window */
         g_state = ST_WAIT_HANDSHAKE;
         led_on(); /* Solid LED = OTA mode */
-    } else if (boot0_asserted) {
-        /* Hardware forced bootloader entry */
-        g_state = ST_MAINTENANCE;
-        led_on();
     } else {
         /* Normal boot: give ESP32 a short window to initiate OTA */
         g_state = ST_WAIT_HANDSHAKE;

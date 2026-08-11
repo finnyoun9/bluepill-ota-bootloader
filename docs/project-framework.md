@@ -4,11 +4,11 @@
 
 在已有的 Bootloader + FreeRTOS + ESP32-OTA 底层基础上，扩展传感器层和上层控制接口。目标：打造一个**协议全覆盖、外设用到极致、多层控制接口**的简历级嵌入式项目。
 
-### 当前实机 checkpoint（2026-08-10）
+### 当前实机 checkpoint（2026-08-11）
 
-- 已完成：SSD1306 本地菜单、EC11 旋转/确认、BH1750、HC-SR501、AHT20+BMP280 温湿度气压。
+- 已完成：SSD1306 本地菜单、EC11 旋转/确认、BH1750、HC-SR501、AHT20+BMP280 温湿度气压、两路继电器、有源蜂鸣器和 WS2812B 自动调光。
 - 当前 AHT20 与 BMP280 是一块组合模块，因此和 OLED、BH1750 一起共用 I2C1 `PB6/PB7 @ 100kHz`；下面的 I2C2 分组仍是后续目标架构。
-- 当前本地 UI 集成在已有 `vAppTask` 中；独立 SensorTask/DisplayTask、执行器联动、Web 仪表盘和 MQTT 仍待实现。
+- 当前本地 UI、传感器采样、WS2812B 调光和湿度→继电器1联动集成在已有 `vAppTask` 中；独立 SensorTask/DisplayTask、更多执行器联动、Web 仪表盘和 MQTT 仍待实现。
 
 ---
 
@@ -21,6 +21,14 @@
 | **I2C1 总线（当前 100kHz — 4 地址）** |||||
 | PB6 | I2C1_SCL | AHT20+BMP280 / BH1750 / SSD1306 | SCL | 温湿度气压+光照+显示 |
 | PB7 | I2C1_SDA | 同上 | SDA | 地址: 0x38/0x76(或0x77)/0x23/0x3C |
+| **SPI2（当前 16MHz，GMT020-02 ST7789）** |||||
+| PB13 | SPI2_SCK | 2.0-inch TFT | SCL | SPI 时钟 |
+| PB15 | SPI2_MOSI | 2.0-inch TFT | SDA | 单向像素/命令数据 |
+| PB12 | GPIO output | 2.0-inch TFT | CS | 低电平选中 |
+| PB14 | GPIO output | 2.0-inch TFT | DC | 命令/数据选择 |
+| PA8 | GPIO output | 2.0-inch TFT | RST | 屏幕硬件复位 |
+| **GPIO bit-bang（WS2812B 单线编码）** |||||
+| PB5 | GPIO output | 15× WS2812B | DIN | 64MHz 时序，DOUT 实机验证 |
 | **I2C2 总线（后续规划 400kHz）** |||||
 | PB10 | I2C2_SCL | MPU6050 / VL53L0X | SCL | IMU+ToF |
 | PB11 | I2C2_SDA | 同上 | SDA | 地址: 0x68/0x29 |
@@ -54,16 +62,16 @@
 | **TIM2 CH1 PWM — SG90 舵机** ||||
 | PA0 | TIM2_CH1 | SG90 | 信号线(橙) |
 | 5V/GND | 电源 | SG90 | 红/棕 |
-| **TIM1 CH1 PWM — 雾化模块调速（可选）** ||||
-| PA8 | TIM1_CH1 | 雾化片驱动 | PWM 输入 |
+| **SPI2 TFT（当前接线）** ||||
+| PB13/PB15 | SPI2 SCK/MOSI | GMT020-02 | SCL/SDA |
+| PB12/PB14/PA8 | GPIO output | GMT020-02 | CS/DC/RST |
 | **GPIO 中断输入** ||||
 | PB0 | GPIO input | HC-SR501 PIR | OUT | 当前轮询 HIGH/LOW，含 30 秒预热 |
 | PB10 | GPIO_EXTI10 | 对射式红外 | OUT | 上升/下降沿，门窗检测 |
-| **GPIO 数字输出** ||||
-| PB12 | GPIO OUT | 继电器1 | IN1 | 低电平触发 |
-| PB13 | GPIO OUT | 继电器2 | IN2 | 低电平触发 |
-| PB14 | GPIO OUT | 有源蜂鸣器 | I/O | 高电平响 |
-| PB15 | GPIO OUT | 雾化片开关 | EN | 继电器3或直接驱动 |
+| **GPIO 数字输出（当前接线）** ||||
+| PA2/PA3 | GPIO OUT | 两路继电器 | IN1/IN2 | 低电平触发 |
+| PB1 | GPIO OUT | 有源蜂鸣器 | IN | 低电平触发 |
+| TBD | GPIO OUT | 雾化片 | EN | PB12-PB15 已被 TFT 占用 |
 | **ADC 输入** ||||
 | PA5 | ADC12_IN5 | MQ-2 烟雾传感器 | AO | 模拟量 |
 | **TIM4 CH1 Input Capture — HC-SR04 超声波** ||||
@@ -73,6 +81,8 @@
 | I2C1 | PB6/PB7 | AHT20+BMP280 | 0x38 + 0x76/0x77 | 温湿度+气压组合板 |
 | I2C1 | PB6/PB7 | BH1750 | 0x23 | 光照 |
 | I2C1 | PB6/PB7 | SSD1306 OLED | 0x3C | 128×64 显示 |
+| SPI2 | PB13/PB15 | GMT020-02 TFT | CS=PB12 | 240×320 ST7789 竖屏彩色显示 |
+| GPIO bit-bang | PB5 | 15× WS2812B | DIN | BH1750 反向联动白光照明 |
 | I2C2 | PB10/PB11 | MPU6050 | 0x68 | 6轴IMU |
 | I2C2 | PB10/PB11 | VL53L0X ToF | 0x29 | 激光测距 |
 
@@ -96,7 +106,12 @@ Blue Pill 3.3V ─┬── 面包板 3.3V 轨 ──┬── AHT20+BMP280 / BH
                  │                    └── VL53L0X
 
 GND ──── 面包板 GND 轨 ──── 所有模块 GND（共地）
+
+外部稳压 5V ── 1N4001 ── WS2812B +5V
+PB5 ── 220~470Ω ── WS2812B DIN
 ```
+
+WS2812B 的 1N4001 串在正电源线上：二极管无条纹端接外部 5V，带白色条纹端接灯带 `+5V`，把灯带供电降到约 4.2V，便于 3.3V DATA 达到高电平门限。不要把二极管串在 DATA 上。灯带与 STM32 必须共地，建议灯带入口并联 470~1000µF 电解电容。
 
 ### I2C 总线接线示意（目标架构）
 
@@ -454,10 +469,10 @@ ESP32→STM32 控制指令：
 | 阶段 | 内容 | 预计 |
 |------|------|------|
 | **Phase 0** | 面包板接线，I2C 总线扫描，确认第一批设备地址 | 已完成 |
-| **Phase 1** | STM32 传感器驱动层（已完成 AHT20/BMP280/BH1750/PIR；其余待接入） | 进行中 |
-| **Phase 2** | STM32 执行器驱动层（继电器/蜂鸣器/舵机/雾化片） | 代码 |
-| **Phase 3** | FreeRTOS 任务整合 + 联动控制逻辑 | 代码 |
-| **Phase 4** | ESP32 WebSocket + HTTP + Web 仪表盘 | 代码 |
+| **Phase 1** | STM32 当前批次传感器（AHT20/BMP280/BH1750/PIR） | 暂告一段落 |
+| **Phase 2** | 继电器/蜂鸣器已完成；加湿器联动等待模块到货 | 等待硬件 |
+| **Phase 3** | FreeRTOS 任务整合 + 联动控制逻辑（湿度继电器、光照灯带已完成） | 进行中 |
+| **Phase 4** | ESP32 WebSocket + HTTP + Web 仪表盘 | 下一阶段 |
 | **Phase 5** | ESP32 MQTT 上云 | 代码 |
 | **Phase 6** | Python 桌面控制面板 | 代码 |
 | **Phase 7** | 整体联调 + OTA 验证 | 联调 |

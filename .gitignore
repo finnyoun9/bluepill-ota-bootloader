@@ -28,8 +28,9 @@ build/
 sdkconfig
 sdkconfig.old
 
-# Local logic-analyzer captures
-uart-*.sr
+# Keep ad-hoc UART captures out of the repository root. Curated captures live
+# under docs/captures/ and are intentionally trackable.
+/uart-*.sr
 
 # EasyEDA Pro local database (contains local account metadata)
 /EnvLink-F103.eprj2

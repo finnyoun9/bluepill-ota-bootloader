@@ -80,10 +80,14 @@ The application never touches flash except to write the OTA request flag. This k
 ### 2. `.ramfunc` for Flash Programming
 STM32F103 has a single flash bank — code executing from flash stalls during erase/program. Flash programming functions are placed in RAM via `__attribute__((section(".ramfunc")))` so the CPU stays alive.
 
-### 3. Bootloader Entry Points (3 ways)
+### 3. Bootloader Entry Points
 - Config flag `BOOT_MODE_OTA` set by application
-- BOOT0 pin (PB0) pulled low — jumper/debug button
 - 200ms passive UART window on every boot
+
+PB0 is reserved for the HC-SR501 PIR input and is not sampled by the
+bootloader. Recovery still uses the Blue Pill's dedicated hardware BOOT0
+jumper to enter the STM32 ROM bootloader, or ST-Link/SWD to reflash either
+image.
 
 ### 4. Protocol Design
 Simple length-prefixed frames with standard IEEE CRC-32. Chunk data is at most 1KB (one flash page) for direct mapping: `addr = APP_BASE + seq * 1024`; an OTA chunk payload is 1028 bytes because it also carries a 4-byte sequence number.
@@ -109,15 +113,18 @@ The 2026-08-10 hardware checkpoint adds a local user interface without changing 
 | Device | Interface | Current wiring | Role |
 |--------|-----------|----------------|------|
 | SSD1306 | I2C1, 0x3C | PB6/PB7 | Five-page 128×64 menu |
+| GMT020-02 ST7789 | SPI2, 16MHz | PB13/PB15 + PB12/PB14/PA8 | Mirrored 240×320 portrait UI |
+| 15× WS2812B | GPIO bit-bang @ 64MHz | PB5 | Inverse BH1750-controlled white lighting |
 | BH1750 | I2C1, 0x23 | PB6/PB7 | Periodic lux measurement |
 | AHT20 | I2C1, 0x38 | PB6/PB7 | Temperature and humidity with CRC-8 |
 | BMP280 | I2C1, 0x76/0x77 | PB6/PB7 | Calibrated fixed-point pressure |
 | EC11 A/B | GPIO EXTI | PA6/PA7 | Full Gray-code x1 navigation |
 | Confirm button | GPIO input | PA1 | Enter/back action |
 | HC-SR501 | GPIO input | PB0 | Motion state after 30 s warm-up |
-| Relay 1/2 | GPIO output | PB12/PB13 | Humidifier (relay 1) and light (relay 2), active-low |
+| Relay 1/2 | GPIO output | PA2/PA3 | Humidifier (relay 1) and light (relay 2), active-low |
+| Active buzzer | GPIO output | PB1 | Alarm output, active-low |
 
-All I2C devices currently share the 100kHz I2C1 bus. `vAppTask` starts AHT20 and BMP280 conversions together, reads them after 90 ms, refreshes the environment data every 2 s, polls BH1750 every 200 ms, and only redraws the active OLED page. Sensor values stay in integer/fixed-point form because STM32F103 has no hardware FPU.
+All I2C devices currently share the 100kHz I2C1 bus. `vAppTask` starts AHT20 and BMP280 conversions together, reads them after 90 ms, refreshes the environment data every 2 s, and polls BH1750 every 200 ms. The same 5..1000 lux range drives a smoothed inverse 160..1 brightness curve for the WS2812B strip, with a 16-level slew step and a 2-level deadband. Because the 15-LED GPIO frame requires a roughly 0.5ms critical section, the application transmits only when the smoothed brightness actually changes. The UI layer sends the same 16×4 character view to both the SSD1306 and the ST7789. The TFT renders directly over SPI without a framebuffer, and sensor values stay in integer/fixed-point form because STM32F103 has no hardware FPU.
 
 ## Directory Structure
 
