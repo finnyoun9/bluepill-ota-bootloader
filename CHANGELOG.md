@@ -6,12 +6,14 @@
 
 ## Current status / 当前状态
 
-- Two-channel relay control (PB12/PB13) is implemented: Bluetooth `RELAY1/RELAY2 ON|OFF`, `RELAY`, `AUTO ON|OFF`, and `MANUAL` commands, plus an auto-humidifier linkage with hysteresis. **Code is merged but not yet hardware-verified** — pending a Windows build/flash test.
-- 两路继电器控制（PB12/PB13）已实现：蓝牙 `RELAY1/RELAY2 ON|OFF`、`RELAY`、`AUTO ON|OFF`、`MANUAL` 命令，以及带回差的自动加湿联动。**代码已合入但尚未实机验证**，待 Windows 侧编译烧录确认。
+- Two active-low relay channels on PA2/PA3 and an active-low buzzer on PB1 are hardware-verified. Bluetooth supports `RELAY1/RELAY2 ON|OFF`, `RELAY`, `AUTO ON|OFF`, `MANUAL`, and `BUZZER ON|OFF`.
+- PA2/PA3 两路低电平触发继电器与 PB1 低电平触发蜂鸣器均已实机验证；蓝牙命令覆盖 `RELAY1/RELAY2 ON|OFF`、`RELAY`、`AUTO ON|OFF`、`MANUAL` 和 `BUZZER ON|OFF`。
+- The 15-LED WS2812B strip is hardware-verified on PB5 using a 64MHz clock-dependent GPIO bit-bang driver. The BH1750 now drives a smoothed inverse brightness curve, and frames are sent only when brightness changes.
+- 15 颗 WS2812B 已在 PB5 上通过 64MHz 时钟相关的 GPIO 位操作驱动完成实机验证；BH1750 采用平滑反向亮度曲线，只有亮度变化时才发送新帧。
 - The STM32 application now provides a hardware-verified local environment terminal with an SSD1306 menu, EC11 navigation, BH1750 light sensing, HC-SR501 motion sensing, and AHT20/BMP280 temperature-humidity-pressure readings.
 - STM32 Application 已形成实机验证的本地环境终端：SSD1306 菜单、EC11 导航、BH1750 光照、HC-SR501 人体感应，以及 AHT20/BMP280 温湿度气压采集均已跑通。
-- All four I2C devices share I2C1 on `PB6/PB7 @ 100kHz`; the current application uses 17,676 B RAM (86.3%) and 25,200 B Flash (38.5%).
-- 四个 I2C 设备当前共用 `PB6/PB7 @ 100kHz` 的 I2C1；Application 占用 RAM 17,676 B（86.3%）、Flash 25,200 B（38.5%）。
+- All four I2C devices share I2C1 on `PB6/PB7 @ 100kHz`; the current application uses 17,780 B RAM (86.8%) and 30,892 B Flash (47.1%).
+- 四个 I2C 设备当前共用 `PB6/PB7 @ 100kHz` 的 I2C1；Application 占用 RAM 17,780 B（86.8%）、Flash 30,892 B（47.1%）。
 - Phone-driven Web OTA is hardware-verified: an iPhone connected directly to the ESP32 SoftAP, uploaded the STM32 application, and completed the update without a PC-side sender.
 - 手机 Web OTA 已通过实机验证：iPhone 直连 ESP32 SoftAP、上传 STM32 Application，并在不使用电脑发包工具的情况下完成升级。
 - The Web update moved the target from firmware version 1 to 2; a follow-up Bluetooth `VERSION` query returned `FW Version: 2`.
@@ -20,10 +22,18 @@
 - PC → 蓝牙 SPP → ESP32 SPIFFS → STM32 Bootloader → Flash/CRC → Application 的完整路径现已通过实机验证。
 - A 15,956-byte application image (`CRC32 0x3B274D7E`) completed OTA successfully, and the updated STM32 application replied `FW Version: 1` after reboot.
 - 15,956 字节的应用镜像（`CRC32 0x3B274D7E`）已完成 OTA；重启后 STM32 新应用返回 `FW Version: 1`。
-- All three firmware targets build, the protocol smoke test passes both the classic and all-byte CRC vectors, and the current hardware wiring is stable at USART1 9600 baud.
-- 三端固件均可构建；协议烟测同时覆盖经典 CRC 向量和全字节向量；当前硬件接线在 USART1 9600 baud 下稳定工作。
+- All three firmware targets build, the protocol smoke test passes both the classic and all-byte CRC vectors, and the current hardware wiring is stable at USART1 115200 baud.
+- 三端固件均可构建；协议烟测同时覆盖经典 CRC 向量和全字节向量；当前硬件接线在 USART1 115200 baud 下稳定工作。
 
 ## Milestones / 里程碑
+
+### Unreleased — Actuator and WS2812B hardware closure / 执行器与灯带实机闭环
+
+- 中文：继电器从与 TFT 冲突的 PB12/PB13 改到 PA2/PA3，有源蜂鸣器使用 PB1；三路均为低电平触发，默认上电关闭。两路继电器触点、共地、蓝牙手动命令和蜂鸣器均已实机验证。
+- English: Moved the relays from TFT-conflicting PB12/PB13 to PA2/PA3 and placed the active buzzer on PB1. All three outputs are active-low and default off; relay contacts, common ground, Bluetooth manual commands, and buzzer operation are hardware-verified.
+- 中文：WS2812B 的 SPI1 4MHz/5-bit 编码在 DIN 上看起来满足时序，但第一颗灯珠 DOUT 没有转发。切换到 PB5 GPIO bit-bang 后，DOUT 捕获到后 14 颗的 336 bit / 42 字节有效帧。最终保留 bit-bang，并将 BH1750 的 5~1000 lux 反向映射到亮度 160~1，每 200ms 计算、每次平滑变化 16 级、2 级死区抑制抖动、仅变化时发帧。
+- English: The SPI1 4MHz/5-bit waveform looked valid at DIN, but the first LED produced no DOUT. After switching to PB5 GPIO bit-banging, DOUT carried a valid 336-bit / 42-byte frame for the remaining 14 LEDs. The final driver keeps bit-banging and maps BH1750's 5..1000 lux range inversely to brightness 160..1, evaluated every 200ms with a 16-level step, a 2-level deadband, and change-only transmission.
+- 验证 / Validation: Application builds without warnings at RAM 17,780 B (86.8%) and Flash 30,892 B (47.1%). Logic-analyzer evidence is retained under `docs/captures/`. / Application builds without warnings at RAM 17,780 B (86.8%) and Flash 30,892 B (47.1%); logic-analyzer evidence is retained under `docs/captures/`.
 
 ### v0.13 — Two-channel relay control / 两路继电器控制
 
@@ -156,8 +166,8 @@
 
 **Commit:** [`860fc96`](https://github.com/finnyoun9/bluepill-ota-bootloader/commit/860fc96209a5a0f4053c98471b5677660212a2d2)
 
-- 中文：这是当前最新、也是这次实际硬件排障的核心提交。把 STM32 链路统一到 `USART1 PA9/PA10 @ 9600`，增加兼容当前 ST-Link/OpenOCD 的烧录脚本，修复 ESP32 Classic SPP 配置、蓝牙文本命令分包重组和 UART 协议镜像问题。
-- English: This is the latest and the key hardware bring-up commit. It standardized the STM32 link on `USART1 PA9/PA10 @ 9600`, added a ST-Link/OpenOCD-compatible uploader, and fixed ESP32 Classic SPP configuration, split text-command reassembly, and the UART protocol mirror.
+- 中文：这是当时实际硬件排障的核心提交。它先把 STM32 链路统一到 `USART1 PA9/PA10 @ 9600`，增加兼容当前 ST-Link/OpenOCD 的烧录脚本，并修复 ESP32 Classic SPP 配置、蓝牙文本命令分包重组和 UART 协议镜像问题；后续当前版本已提升到 115200 baud。
+- English: This was the key hardware bring-up commit. It first standardized the STM32 link on `USART1 PA9/PA10 @ 9600`, added a ST-Link/OpenOCD-compatible uploader, and fixed ESP32 Classic SPP configuration, split text-command reassembly, and the UART protocol mirror; the current revision later moved to 115200 baud.
 - 实机结果 / Hardware evidence: PC Bluetooth `COM6` 连续 10 次 `VERSION` 均得到 `FW Version: 0`；逻辑分析仪也解码到了从 ESP32 发往 `PA10` 的有效帧。
 - Remaining scope / 尚未覆盖: 这只证明控制链路能双向收发，**不等于**固件经蓝牙 OTA 到 STM32 已经完成。
 

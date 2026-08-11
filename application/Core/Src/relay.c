@@ -2,9 +2,9 @@
 
 #include "stm32f1xx_hal.h"
 
-#define RELAY_PORT    GPIOB
-#define RELAY1_PIN    GPIO_PIN_12
-#define RELAY2_PIN    GPIO_PIN_13
+#define RELAY_PORT    GPIOA
+#define RELAY1_PIN    GPIO_PIN_2
+#define RELAY2_PIN    GPIO_PIN_3
 
 /* Most relay modules are active-LOW: IN low closes the contact (load ON).
  * If the module is active-high, set to 0 or flip the on-board jumper. */
@@ -24,7 +24,10 @@ static GPIO_PinState relay_io_level(bool on) {
 }
 
 bool relay_init(void) {
-    __HAL_RCC_GPIOB_CLK_ENABLE();
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+
+    /* Drive the inactive level before enabling push-pull output mode. */
+    HAL_GPIO_WritePin(RELAY_PORT, RELAY1_PIN | RELAY2_PIN, GPIO_PIN_SET);
 
     GPIO_InitTypeDef gpio = {0};
     gpio.Pin   = RELAY1_PIN | RELAY2_PIN;
@@ -33,8 +36,8 @@ bool relay_init(void) {
     gpio.Speed = GPIO_SPEED_FREQ_LOW;
     HAL_GPIO_Init(RELAY_PORT, &gpio);
 
-    relay_set(0U, false);
-    relay_set(1U, false);
+    g_relay_state[0U] = false;
+    g_relay_state[1U] = false;
     g_auto_mode = false;
     return true;
 }

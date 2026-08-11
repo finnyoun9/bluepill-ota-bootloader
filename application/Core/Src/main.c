@@ -9,7 +9,7 @@
  * Tasks:
  *   vCommTask      — UART frame receive/send, protocol parsing
  *   vControlTask   — OTA trigger (writes config + resets), version reporting
- *   vAppTask       — User application logic (placeholder)
+ *   vAppTask       — Sensors, local UI, actuators, and WS2812B linkage
  *   vLedTask       — Status LED heartbeat
  *   vMonitorTask   — System health, stack/heap monitoring
  */
@@ -30,10 +30,12 @@
 #include "cmd_handler.h"
 #include "env_i2c.h"
 #include "environment_sensor.h"
-#include "oled.h"
+#include "ui_display.h"
 #include "pir_sensor.h"
+#include "buzzer.h"
 #include "relay.h"
 #include "rotary_encoder.h"
+#include "ws2812b.h"
 
 /*---------------------------------------------------------------------------
  * Pin definitions
@@ -50,12 +52,14 @@ static QueueHandle_t        g_cmd_queue;       /* ProtoFrame_t*: comm → contro
 static QueueHandle_t        g_data_queue;      /* Raw bytes: comm → app */
 static EventGroupHandle_t   g_event_group;
 static StreamBufferHandle_t g_rx_stream;
-static bool                 g_oled_ready;
+static bool                 g_display_ready;
 static bool                 g_bh1750_ready;
 static bool                 g_environment_ready;
 static bool                 g_encoder_ready;
 static bool                 g_pir_ready;
+static bool                 g_buzzer_ready;
 static bool                 g_relay_ready;
+static bool                 g_ws2812b_ready;
 
 /* The CMSIS startup file copies .data only. ota_config.c places the short
  * Flash erase/program wrappers in .ramfunc, so initialize that section before
@@ -68,6 +72,15 @@ extern uint8_t _eramfunc;
 #define EVENT_OTA_AVAILABLE  (1 << 0)
 #define EVENT_CONNECTED      (1 << 1)
 #define EVENT_ERROR          (1 << 2)
+
+#define WS2812_UPDATE_MS             200U
+#define WS2812_DARK_LUX              5U
+#define WS2812_BRIGHT_LUX            1000U
+#define WS2812_DARK_BRIGHTNESS       160U
+#define WS2812_BRIGHT_BRIGHTNESS     1U
+#define WS2812_FALLBACK_BRIGHTNESS   24U
+#define WS2812_BRIGHTNESS_STEP       16U
+#define WS2812_BRIGHTNESS_DEADBAND   2U
 
 /*---------------------------------------------------------------------------
  * System init
@@ -251,15 +264,15 @@ typedef enum {
 
 static void ui_show_menu_item(uint8_t line, bool selected,
                               const char *label) {
-    oled_show_char(line, 1U, selected ? '>' : ' ');
-    oled_show_string(line, 3U, label);
+    ui_display_show_char(line, 1U, selected ? '>' : ' ');
+    ui_display_show_string(line, 3U, label);
 }
 
 static void ui_render_menu(uint8_t selected) {
     const uint8_t first = (selected < 3U) ? 0U : (uint8_t)(selected - 2U);
 
-    oled_clear();
-    oled_show_string(1U, 1U, "ENVLINK MENU");
+    ui_display_clear();
+    ui_display_show_string(1U, 1U, "ENVLINK MENU");
     for (uint8_t row = 0U; row < 3U; row++) {
         const uint8_t item = (uint8_t)(first + row);
         const char *label;
@@ -286,12 +299,12 @@ static void ui_render_menu(uint8_t selected) {
 
 static void ui_render_environment(const EnvironmentReading_t *reading,
                                   bool valid) {
-    oled_clear();
-    oled_show_string(1U, 1U, "ENVIRONMENT");
+    ui_display_clear();
+    ui_display_show_string(1U, 1U, "ENVIRONMENT");
     if (!valid || reading == NULL) {
-        oled_show_string(2U, 1U, "TEMP: ERROR");
-        oled_show_string(3U, 1U, "HUM:  ERROR");
-        oled_show_string(4U, 1U, "PRES: ERROR");
+        ui_display_show_string(2U, 1U, "TEMP: ERROR");
+        ui_display_show_string(3U, 1U, "HUM:  ERROR");
+        ui_display_show_string(4U, 1U, "PRES: ERROR");
         return;
     }
 
@@ -306,86 +319,89 @@ static void ui_render_environment(const EnvironmentReading_t *reading,
     const uint32_t pressure_deci_hpa =
         (reading->pressure_pa + 5U) / 10U;
 
-    oled_show_string(2U, 1U, "TEMP:");
-    oled_show_char(2U, 7U, temperature < 0 ? '-' : '+');
-    oled_show_num(2U, 8U, temperature_magnitude / 100U, 2U);
-    oled_show_char(2U, 10U, '.');
-    oled_show_num(2U, 11U, temperature_magnitude % 100U, 2U);
-    oled_show_string(2U, 13U, " C");
+    ui_display_show_string(2U, 1U, "TEMP:");
+    ui_display_show_char(2U, 7U, temperature < 0 ? '-' : '+');
+    ui_display_show_num(2U, 8U, temperature_magnitude / 100U, 2U);
+    ui_display_show_char(2U, 10U, '.');
+    ui_display_show_num(2U, 11U, temperature_magnitude % 100U, 2U);
+    ui_display_show_string(2U, 13U, " C");
 
-    oled_show_string(3U, 1U, "HUM: ");
-    oled_show_num(3U, 6U, humidity_whole, humidity_digits);
-    oled_show_char(3U, (uint8_t)(6U + humidity_digits), '.');
-    oled_show_num(3U, (uint8_t)(7U + humidity_digits),
+    ui_display_show_string(3U, 1U, "HUM: ");
+    ui_display_show_num(3U, 6U, humidity_whole, humidity_digits);
+    ui_display_show_char(3U, (uint8_t)(6U + humidity_digits), '.');
+    ui_display_show_num(3U, (uint8_t)(7U + humidity_digits),
                   humidity_deci_percent % 10U, 1U);
-    oled_show_string(3U, (uint8_t)(8U + humidity_digits), "% RH");
+    ui_display_show_string(3U, (uint8_t)(8U + humidity_digits), "% RH");
 
-    oled_show_string(4U, 1U, "PRES:");
-    oled_show_num(4U, 6U, pressure_deci_hpa / 10U, 4U);
-    oled_show_char(4U, 10U, '.');
-    oled_show_num(4U, 11U, pressure_deci_hpa % 10U, 1U);
-    oled_show_string(4U, 12U, " HPA");
+    ui_display_show_string(4U, 1U, "PRES:");
+    ui_display_show_num(4U, 6U, pressure_deci_hpa / 10U, 4U);
+    ui_display_show_char(4U, 10U, '.');
+    ui_display_show_num(4U, 11U, pressure_deci_hpa % 10U, 1U);
+    ui_display_show_string(4U, 12U, " HPA");
 }
 
 static void ui_render_light_value(uint16_t light_lux, bool light_valid) {
     if (light_valid) {
-        oled_show_num(2U, 6U, light_lux, 5U);
-        oled_show_string(2U, 11U, " LX");
+        ui_display_show_num(2U, 6U, light_lux, 5U);
+        ui_display_show_string(2U, 11U, " LX");
     } else {
-        oled_show_string(2U, 6U, "ERROR   ");
+        ui_display_show_string(2U, 6U, "ERROR   ");
     }
 }
 
 static void ui_render_light(uint16_t light_lux, bool light_valid) {
-    oled_clear();
-    oled_show_string(1U, 1U, "LIGHT SENSOR");
-    oled_show_string(2U, 1U, "LUX:");
-    oled_show_string(4U, 1U, "PRESS TO BACK");
+    ui_display_clear();
+    ui_display_show_string(1U, 1U, "LIGHT SENSOR");
+    ui_display_show_string(2U, 1U, "LUX:");
+    ui_display_show_string(4U, 1U, "PRESS TO BACK");
     ui_render_light_value(light_lux, light_valid);
 }
 
 static void ui_render_motion(bool motion_detected, bool warmed_up) {
-    oled_clear();
-    oled_show_string(1U, 1U, "MOTION SENSOR");
-    oled_show_string(2U, 1U, "STATE:");
+    ui_display_clear();
+    ui_display_show_string(1U, 1U, "MOTION SENSOR");
+    ui_display_show_string(2U, 1U, "STATE:");
     if (!g_pir_ready) {
-        oled_show_string(2U, 8U, "ERROR");
+        ui_display_show_string(2U, 8U, "ERROR");
     } else if (!warmed_up) {
-        oled_show_string(2U, 8U, "WARMUP");
+        ui_display_show_string(2U, 8U, "WARMUP");
     } else {
-        oled_show_string(2U, 8U,
+        ui_display_show_string(2U, 8U,
                          motion_detected ? "DETECTED" : "CLEAR   ");
     }
-    oled_show_string(3U, 1U,
+    ui_display_show_string(3U, 1U,
                      motion_detected ? "OUT: HIGH" : "OUT: LOW ");
-    oled_show_string(4U, 1U, "PRESS TO BACK");
+    ui_display_show_string(4U, 1U, "PRESS TO BACK");
 }
 
 static void ui_render_system(void) {
     BootConfig_t cfg;
 
-    oled_clear();
-    oled_show_string(1U, 1U, "SYSTEM STATUS");
-    oled_show_string(2U, 1U, "FW:");
+    ui_display_clear();
+    ui_display_show_string(1U, 1U, "SYSTEM STATUS");
+    ui_display_show_string(2U, 1U, "FW:");
     if (ota_config_read(&cfg)) {
-        oled_show_num(2U, 5U, cfg.fw_version, 4U);
+        ui_display_show_num(2U, 5U, cfg.fw_version, 4U);
     } else {
-        oled_show_string(2U, 5U, "N/A ");
+        ui_display_show_string(2U, 5U, "N/A ");
     }
-    oled_show_string(2U, 9U, relay_auto_enabled() ? "A:ON " : "A:OFF");
-    oled_show_string(3U, 1U, "R1:");
-    oled_show_string(3U, 4U, relay_get_state(0U) ? "ON " : "OFF");
-    oled_show_string(3U, 8U, "R2:");
-    oled_show_string(3U, 11U, relay_get_state(1U) ? "ON " : "OFF");
-    oled_show_string(4U, 1U, "PRESS TO BACK");
+    ui_display_show_string(2U, 9U,
+                           relay_auto_enabled() ? "A:ON " : "A:OFF");
+    ui_display_show_string(3U, 1U, "R1:");
+    ui_display_show_string(3U, 4U,
+                           relay_get_state(0U) ? "ON " : "OFF");
+    ui_display_show_string(3U, 8U, "R2:");
+    ui_display_show_string(3U, 11U,
+                           relay_get_state(1U) ? "ON " : "OFF");
+    ui_display_show_string(4U, 1U, "PRESS TO BACK");
 }
 
 static void ui_render_about(void) {
-    oled_clear();
-    oled_show_string(1U, 1U, "ENVLINK-F103");
-    oled_show_string(2U, 1U, "ESP32 OTA BRIDGE");
-    oled_show_string(3U, 1U, "STM32 + RTOS");
-    oled_show_string(4U, 1U, "PRESS TO BACK");
+    ui_display_clear();
+    ui_display_show_string(1U, 1U, "ENVLINK-F103");
+    ui_display_show_string(2U, 1U, "ESP32 OTA BRIDGE");
+    ui_display_show_string(3U, 1U, "STM32 + RTOS");
+    ui_display_show_string(4U, 1U, "PRESS TO BACK");
 }
 
 static void ui_render_screen(UiScreen_t screen, uint8_t selected,
@@ -420,8 +436,9 @@ static void ui_render_screen(UiScreen_t screen, uint8_t selected,
  * Relay control commands (forwarded from ESP32 via CMD_APP_MSG)
  *
  * Canonical forms sent by the bridge:
- *   RELAY1 ON | RELAY1 OFF | RELAY2 ON | RELAY2 OFF | RELAY | AUTO ON | AUTO OFF
- * Replies with CMD_STATUS_RSP {relay1, relay2, auto_mode}.
+ *   RELAY1 ON | RELAY1 OFF | RELAY2 ON | RELAY2 OFF | RELAY
+ *   AUTO ON | AUTO OFF | BUZZER ON | BUZZER OFF
+ * Replies with CMD_STATUS_RSP {relay1, relay2, auto_mode, buzzer}.
  *---------------------------------------------------------------------------*/
 
 #define RELAY_AUTO_HUM_ON   4000U  /* %RH x100: start humidifier below this */
@@ -449,16 +466,66 @@ static void handle_control_command(const char *cmd) {
     } else if (strncmp(cmd, "AUTO", 4U) == 0) {
         relay_set_auto(strstr(cmd + 4, "OFF") == NULL);
         handled = true;
+    } else if (strncmp(cmd, "BUZZER", 6U) == 0) {
+        if (strstr(cmd + 6, "ON") != NULL) {
+            buzzer_set(true);
+        } else if (strstr(cmd + 6, "OFF") != NULL) {
+            buzzer_set(false);
+        }
+        handled = true;
     }
 
     if (handled) {
-        uint8_t status[3] = {
+        uint8_t status[4] = {
             relay_get_state(0U) ? 1U : 0U,
             relay_get_state(1U) ? 1U : 0U,
-            relay_auto_enabled() ? 1U : 0U
+            relay_auto_enabled() ? 1U : 0U,
+            buzzer_get_state() ? 1U : 0U
         };
         cmd_handler_send_frame(CMD_STATUS_RSP, status, sizeof(status));
     }
+}
+
+static uint8_t ws2812_target_brightness(uint16_t light_lux,
+                                        bool light_valid) {
+    if (!light_valid) {
+        return WS2812_FALLBACK_BRIGHTNESS;
+    }
+    if (light_lux <= WS2812_DARK_LUX) {
+        return WS2812_DARK_BRIGHTNESS;
+    }
+    if (light_lux >= WS2812_BRIGHT_LUX) {
+        return WS2812_BRIGHT_BRIGHTNESS;
+    }
+
+    const uint32_t lux_range = WS2812_BRIGHT_LUX - WS2812_DARK_LUX;
+    const uint32_t brightness_range =
+        WS2812_DARK_BRIGHTNESS - WS2812_BRIGHT_BRIGHTNESS;
+    const uint32_t reduction =
+        ((uint32_t)(light_lux - WS2812_DARK_LUX) * brightness_range) /
+        lux_range;
+    return (uint8_t)(WS2812_DARK_BRIGHTNESS - reduction);
+}
+
+static uint8_t ws2812_smooth_brightness(uint8_t current, uint8_t target) {
+    const uint8_t difference = current < target
+                                   ? (uint8_t)(target - current)
+                                   : (uint8_t)(current - target);
+    if (difference <= WS2812_BRIGHTNESS_DEADBAND) {
+        return current;
+    }
+
+    if (current < target) {
+        return difference > WS2812_BRIGHTNESS_STEP
+                   ? (uint8_t)(current + WS2812_BRIGHTNESS_STEP)
+                   : target;
+    }
+    if (current > target) {
+        return difference > WS2812_BRIGHTNESS_STEP
+                   ? (uint8_t)(current - WS2812_BRIGHTNESS_STEP)
+                   : target;
+    }
+    return current;
 }
 
 static void vAppTask(void *pvParameters) {
@@ -475,14 +542,25 @@ static void vAppTask(void *pvParameters) {
     bool previous_button_pressed =
         g_encoder_ready && rotary_encoder_button_pressed();
     TickType_t last_light_read = 0U;
+    TickType_t last_ws2812_update = 0U;
+    uint8_t ws2812_brightness =
+        ws2812_target_brightness(light_lux, light_valid);
+    uint8_t ws2812_last_sent = 0U;
     const TickType_t app_started_at = xTaskGetTickCount();
     TickType_t last_environment_start = app_started_at;
     TickType_t environment_started_at = app_started_at;
     bool environment_pending = g_environment_ready &&
                                environment_sensor_start_measurement();
 
-    if (g_oled_ready) {
+    if (g_display_ready) {
         ui_render_menu(selected);
+    }
+    if (g_ws2812b_ready) {
+        g_ws2812b_ready =
+            ws2812b_show_white(ws2812_brightness);
+        if (g_ws2812b_ready) {
+            ws2812_last_sent = ws2812_brightness;
+        }
     }
 
     bool relay_ui_shown[RELAY_CHANNELS] = { false, false };
@@ -516,7 +594,7 @@ static void vAppTask(void *pvParameters) {
                                      UI_MENU_ITEM_COUNT);
                 remaining--;
             }
-            if (g_oled_ready) {
+            if (g_display_ready) {
                 ui_render_menu(selected);
             }
         }
@@ -527,7 +605,7 @@ static void vAppTask(void *pvParameters) {
             } else {
                 screen = UI_SCREEN_MENU;
             }
-            if (g_oled_ready) {
+            if (g_display_ready) {
                 ui_render_screen(screen, selected, &environment,
                                  environment_valid, light_lux, light_valid,
                                  motion_detected, pir_warmed_up);
@@ -539,8 +617,25 @@ static void vAppTask(void *pvParameters) {
             light_valid =
                 g_bh1750_ready && bh1750_read_lux(&light_lux);
 
-            if (g_oled_ready && screen == UI_SCREEN_LIGHT) {
+            if (g_display_ready && screen == UI_SCREEN_LIGHT) {
                 ui_render_light_value(light_lux, light_valid);
+            }
+        }
+
+        if (g_ws2812b_ready &&
+            (now - last_ws2812_update) >=
+                pdMS_TO_TICKS(WS2812_UPDATE_MS)) {
+            last_ws2812_update = now;
+            const uint8_t target =
+                ws2812_target_brightness(light_lux, light_valid);
+            ws2812_brightness =
+                ws2812_smooth_brightness(ws2812_brightness, target);
+            if (ws2812_brightness != ws2812_last_sent) {
+                g_ws2812b_ready =
+                    ws2812b_show_white(ws2812_brightness);
+                if (g_ws2812b_ready) {
+                    ws2812_last_sent = ws2812_brightness;
+                }
             }
         }
 
@@ -549,7 +644,7 @@ static void vAppTask(void *pvParameters) {
                 pdMS_TO_TICKS(ENV_CONVERSION_MS)) {
             environment_valid = environment_sensor_read(&environment);
             environment_pending = false;
-            if (g_oled_ready && screen == UI_SCREEN_ENVIRONMENT) {
+            if (g_display_ready && screen == UI_SCREEN_ENVIRONMENT) {
                 ui_render_environment(&environment, environment_valid);
             }
 
@@ -575,7 +670,7 @@ static void vAppTask(void *pvParameters) {
                 environment_sensor_start_measurement();
             if (!environment_pending) {
                 environment_valid = false;
-                if (g_oled_ready && screen == UI_SCREEN_ENVIRONMENT) {
+                if (g_display_ready && screen == UI_SCREEN_ENVIRONMENT) {
                     ui_render_environment(&environment, false);
                 }
             }
@@ -589,7 +684,7 @@ static void vAppTask(void *pvParameters) {
             current_pir_warmed_up != pir_warmed_up) {
             motion_detected = current_motion;
             pir_warmed_up = current_pir_warmed_up;
-            if (g_oled_ready && screen == UI_SCREEN_MOTION) {
+            if (g_display_ready && screen == UI_SCREEN_MOTION) {
                 ui_render_motion(motion_detected, pir_warmed_up);
             }
         }
@@ -607,7 +702,7 @@ static void vAppTask(void *pvParameters) {
                 auto_ui_shown = relay_auto_enabled();
                 relay_changed = true;
             }
-            if (relay_changed && g_oled_ready) {
+            if (relay_changed && g_display_ready) {
                 ui_render_system();
             }
         }
@@ -766,17 +861,23 @@ int main(void) {
     /* Initialize USART1 (PA9/PA10) for ESP32 communication. */
     uart_comm_init(115200U);
 
-    /* PB6/PB7: OLED, BH1750, AHT20 and BMP280 on I2C1.
+    /* PB5: WS2812B DIN through timing-critical GPIO bit-bang.
+     * PB6/PB7: OLED, BH1750, AHT20 and BMP280 on I2C1.
+     * PB13/PB15: ST7789 SCK/MOSI on SPI2; PB12/PB14/PA8: CS/DC/RST.
      * PA6/PA7: encoder A/B; encoder C is tied to GND.
      * PA1: active-low confirm button. PB0: HC-SR501 output. */
-    if (env_i2c_init()) {
-        g_oled_ready = oled_init();
+    const bool i2c_ready = env_i2c_init();
+    g_display_ready = ui_display_init(i2c_ready);
+    if (i2c_ready) {
         g_bh1750_ready = bh1750_init();
         g_environment_ready = environment_sensor_init();
     }
     g_encoder_ready = rotary_encoder_init();
     g_pir_ready = pir_sensor_init();
+    g_buzzer_ready = buzzer_init();
     g_relay_ready = relay_init();
+    g_ws2812b_ready = ws2812b_init();
+    (void)g_buzzer_ready;
 
     /* Create FreeRTOS primitives and tasks */
     app_tasks_init();
