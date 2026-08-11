@@ -8,7 +8,7 @@
 
 - 已完成：SSD1306 本地菜单、EC11 旋转/确认、BH1750、HC-SR501、AHT20+BMP280 温湿度气压、两路继电器、有源蜂鸣器和 WS2812B 自动调光。
 - 当前 AHT20 与 BMP280 是一块组合模块，因此和 OLED、BH1750 一起共用 I2C1 `PB6/PB7 @ 100kHz`；下面的 I2C2 分组仍是后续目标架构。
-- 当前本地 UI、传感器采样、WS2812B 调光和湿度→继电器1联动集成在已有 `vAppTask` 中；STM32 与 ESP32 新版固件均已烧录，实时 Web 状态页和 `/api/sensors` 已完成局域网实机回归。独立 SensorTask/DisplayTask、Web 写控制、WebSocket 和 MQTT 仍待实现。
+- 当前本地 UI、传感器采样、WS2812B 调光和湿度→继电器2（加湿器）联动集成在已有 `vAppTask` 中；STM32 与 ESP32 新版固件均已烧录，实时 Web 状态页和 `/api/sensors` 已完成局域网实机回归。独立 SensorTask/DisplayTask、Web 写控制、WebSocket 和 MQTT 仍待实现。
 
 ---
 
