@@ -1155,10 +1155,106 @@ static esp_err_t web_start_handler(httpd_req_t *req) {
     return web_send_json(req, "{\"message\":\"OTA started\"}", "202 Accepted");
 }
 
+/*---------------------------------------------------------------------------
+ * Web control: POST /api/control
+ *
+ * Body is a tiny JSON object with one boolean field, e.g.
+ *   {"relay1":true} | {"relay2":false} | {"buzzer":true} | {"auto":false}
+ * The command is forwarded to the STM32 through the same CMD_APP_MSG path
+ * used by Bluetooth; the reply is the current relay/auto/buzzer state.
+ *---------------------------------------------------------------------------*/
+
+static bool web_body_field_true(const char *body, const char *key) {
+    const char *found = strstr(body, key);
+    if (found == NULL) {
+        return false;
+    }
+    found += strlen(key);
+    while (*found == ' ' || *found == ':' || *found == '"') {
+        found++;
+    }
+    return strncmp(found, "true", 4) == 0;
+}
+
+static esp_err_t web_control_handler(httpd_req_t *req) {
+    char body[64];
+    int remaining = req->content_len;
+    int offset = 0;
+    if (remaining <= 0 || remaining >= (int)sizeof(body)) {
+        return web_send_json(req, "{\"message\":\"Empty control body\"}",
+                             "400 Bad Request");
+    }
+    while (remaining > 0) {
+        int received = httpd_req_recv(req, body + offset, (size_t)remaining);
+        if (received == HTTPD_SOCK_ERR_TIMEOUT) {
+            continue;
+        }
+        if (received <= 0) {
+            return web_send_json(req, "{\"message\":\"Control body read error\"}",
+                                 "400 Bad Request");
+        }
+        offset += received;
+        remaining -= received;
+    }
+    body[offset] = '\0';
+    ESP_LOGI(TAG, "control body: '%s' len=%d", body, offset);
+
+    char msg[32];
+    if (strstr(body, "relay1") != NULL) {
+        snprintf(msg, sizeof(msg), "RELAY1 %s",
+                 web_body_field_true(body, "relay1") ? "ON" : "OFF");
+    } else if (strstr(body, "relay2") != NULL) {
+        snprintf(msg, sizeof(msg), "RELAY2 %s",
+                 web_body_field_true(body, "relay2") ? "ON" : "OFF");
+    } else if (strstr(body, "buzzer") != NULL) {
+        snprintf(msg, sizeof(msg), "BUZZER %s",
+                 web_body_field_true(body, "buzzer") ? "ON" : "OFF");
+    } else if (strstr(body, "auto") != NULL) {
+        snprintf(msg, sizeof(msg), "AUTO %s",
+                 web_body_field_true(body, "auto") ? "ON" : "OFF");
+    } else {
+        return web_send_json(req,
+                             "{\"message\":\"Unsupported control field\"}",
+                             "400 Bad Request");
+    }
+    ESP_LOGI(TAG, "control command: '%s'", msg);
+
+    if (g_ota_running || g_web_ota_state == WEB_OTA_TRANSFERRING) {
+        return web_send_json(req, "{\"message\":\"OTA transfer busy\"}",
+                             "409 Conflict");
+    }
+    if (xSemaphoreTake(g_ota_mutex, pdMS_TO_TICKS(750)) != pdTRUE) {
+        return web_send_json(req, "{\"message\":\"UART busy, retry later\"}",
+                             "409 Conflict");
+    }
+
+    ProtoFrame_t resp;
+    bool ok = stm32_send_frame(CMD_APP_MSG, (const uint8_t *)msg,
+                               strlen(msg)) &&
+              stm32_wait_cmd(CMD_STATUS_RSP, &resp, 2000) &&
+              resp.len >= 4;
+    xSemaphoreGive(g_ota_mutex);
+
+    if (!ok) {
+        return web_send_json(req, "{\"message\":\"No response from STM32\"}",
+                             "502 Bad Gateway");
+    }
+
+    char json[128];
+    snprintf(json, sizeof(json),
+             "{\"ok\":true,\"relay1\":%s,\"relay2\":%s,\"auto\":%s,"
+             "\"buzzer\":%s}",
+             resp.payload[0] ? "true" : "false",
+             resp.payload[1] ? "true" : "false",
+             resp.payload[2] ? "true" : "false",
+             resp.payload[3] ? "true" : "false");
+    return web_send_json(req, json, NULL);
+}
+
 static void web_server_start(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 6144;
-    config.max_uri_handlers = 5;
+    config.max_uri_handlers = 6;
     config.recv_wait_timeout = 10;
 
     if (httpd_start(&g_http_server, &config) != ESP_OK) {
@@ -1186,12 +1282,17 @@ static void web_server_start(void) {
         .uri = "/api/start", .method = HTTP_POST,
         .handler = web_start_handler, .user_ctx = NULL
     };
+    const httpd_uri_t control = {
+        .uri = "/api/control", .method = HTTP_POST,
+        .handler = web_control_handler, .user_ctx = NULL
+    };
 
     ESP_ERROR_CHECK(httpd_register_uri_handler(g_http_server, &root));
     ESP_ERROR_CHECK(httpd_register_uri_handler(g_http_server, &status));
     ESP_ERROR_CHECK(httpd_register_uri_handler(g_http_server, &sensors));
     ESP_ERROR_CHECK(httpd_register_uri_handler(g_http_server, &upload));
     ESP_ERROR_CHECK(httpd_register_uri_handler(g_http_server, &start));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(g_http_server, &control));
     ESP_LOGI(TAG, "Web OTA ready: connect to %s and open http://192.168.4.1",
              WIFI_AP_SSID);
 }
