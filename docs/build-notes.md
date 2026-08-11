@@ -7,7 +7,7 @@
 | 固件 | 工具链 | RAM | Flash | 产物 |
 |------|--------|-----|-------|------|
 | Bootloader | `pio run -e bluepill` | 11.0% (2260B) | 10.7% (7040B) | `.pio/build/bluepill/firmware.bin` |
-| Application | `pio run -e app` | 86.9% (17796B) | 47.7% (31276B) | `.pio/build/app/firmware.bin` |
+| Application | `pio run -e app` | 86.9% (17796B) | 47.8% (31348B) | `.pio/build/app/firmware.bin` |
 | ESP32 Bridge | `pio run -d esp32-comm-bridge` | 19.9% (65184B) | 74.7% (1370061B / 1835008B) | `esp32-comm-bridge/.pio/build/esp32dev/firmware.bin` |
 
 - Bootloader 产物约 6.9KB，满足 **8KB 硬约束**
