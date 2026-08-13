@@ -57,7 +57,7 @@ static const char WEB_OTA_PAGE[] = R"WEBOTA(
     .control-card{display:flex;align-items:center;justify-content:space-between;gap:18px;min-height:104px;padding:18px;border:1px solid var(--line);border-radius:17px;background:linear-gradient(145deg,var(--surface2),rgba(9,21,35,.95))}
     .control-card h3{margin:0 0 6px;font-size:14px}.control-card p{margin:0;color:var(--muted);font-size:11px;line-height:1.5}
     .switch{position:relative;flex:none;width:46px;height:26px;border:0;border-radius:999px;background:#26384e;cursor:pointer;transition:background .2s}.switch:after{content:"";position:absolute;top:4px;left:4px;width:18px;height:18px;border-radius:50%;background:#8a9ab0;transition:transform .2s,background .2s}.switch.on{background:var(--green)}.switch.on:after{transform:translateX(20px);background:#0c1b12}
-    .range-card{grid-column:1/-1;display:block}.range-head{display:flex;justify-content:space-between;align-items:center}.range-value{color:var(--yellow);font-weight:800}input[type=range]{width:100%;margin:20px 0 2px;accent-color:var(--yellow);opacity:.55}
+    .range-card{grid-column:1/-1;display:block}.range-head{display:flex;justify-content:space-between;align-items:center}.range-value{color:var(--yellow);font-weight:800}input[type=range]{width:100%;margin:20px 0 2px;accent-color:var(--yellow)}input[type=range]:disabled{opacity:.35;cursor:not-allowed}
     .pending{display:inline-flex;margin-top:8px;padding:4px 7px;border-radius:7px;background:rgba(129,146,169,.1);color:#92a2b8;font-size:9px;font-weight:800;letter-spacing:.06em}
     .system-grid{display:grid;grid-template-columns:.7fr 1.3fr;gap:14px}.system-stack{display:grid;gap:14px}
     .bridge-state{display:flex;align-items:center;gap:12px;padding:15px;border-radius:14px;background:rgba(7,16,29,.5);border:1px solid var(--line)}.bridge-state .big-dot{width:12px;height:12px;border-radius:50%;background:var(--muted)}.bridge-state.online .big-dot{background:var(--green);box-shadow:0 0 18px rgba(85,214,167,.7)}.bridge-state b{font-size:13px}.bridge-state small{display:block;margin-top:3px;color:var(--muted);font-size:10px}
@@ -108,8 +108,8 @@ static const char WEB_OTA_PAGE[] = R"WEBOTA(
         <div class="panel-title"><h2>设备状态</h2><span>STM32 actuators</span></div>
         <div class="device-grid">
           <div class="device"><div class="device-top"><i class="state-dot" id="pirDot"></i><span>人体</span></div><b id="pirState">--</b><small>PIR sensor</small></div>
-          <div class="device"><div class="device-top"><i class="state-dot" id="relay1Dot"></i><span>继电器 1</span></div><b id="relay1State">--</b><small>灯带 VCC</small></div>
-          <div class="device"><div class="device-top"><i class="state-dot" id="relay2Dot"></i><span>继电器 2</span></div><b id="relay2State">--</b><small>加湿器 VCC</small></div>
+          <div class="device"><div class="device-top"><i class="state-dot" id="relay1Dot"></i><span>继电器 1</span></div><b id="relay1State">--</b><small>暂未使用</small></div>
+          <div class="device"><div class="device-top"><i class="state-dot" id="relay2Dot"></i><span>继电器 2</span></div><b id="relay2State">--</b><small>灯带 VCC · NO2</small></div>
           <div class="device"><div class="device-top"><i class="state-dot" id="ledDot"></i><span>灯带</span></div><b id="ledState">--</b><small id="ledDetail">WS2812B</small></div>
           <div class="device"><div class="device-top"><i class="state-dot" id="buzzerDot"></i><span>蜂鸣器</span></div><b id="buzzerState">--</b><small>Active low</small></div>
         </div>
@@ -117,7 +117,7 @@ static const char WEB_OTA_PAGE[] = R"WEBOTA(
       <article class="panel">
         <div class="panel-title"><h2>系统摘要</h2><span>Live</span></div>
         <div class="summary">
-          <div class="summary-row"><span>运行模式</span><b>自动</b></div>
+          <div class="summary-row"><span>灯带模式</span><b id="modeSummary">--</b></div>
           <div class="summary-row"><span>STM32 链路</span><b id="stm32Link">等待协议</b></div>
           <div class="summary-row"><span>ESP32 Bridge</span><b id="bridgeSummary">连接中</b></div>
           <div class="summary-row"><span>最后更新</span><b id="lastUpdate">--:--:--</b></div>
@@ -129,11 +129,10 @@ static const char WEB_OTA_PAGE[] = R"WEBOTA(
   <section class="page" id="control">
     <div class="panel-title"><h2>本地设备控制</h2><span>通过 ESP32 → STM32 实时下发</span></div>
     <div class="control-grid">
-      <article class="control-card"><div><h3>加湿器</h3><p>继电器 2 · 自动湿度控制</p></div><button class="switch" data-ctl="relay2" aria-label="加湿器开关"></button></article>
-      <article class="control-card"><div><h3>灯带电源</h3><p>继电器 1 · 通断 WS2812B VCC</p></div><button class="switch" data-ctl="relay1" aria-label="继电器1开关"></button></article>
+      <article class="control-card"><div><h3>灯带电源</h3><p>继电器 2 · NO2 通断 WS2812B VCC</p></div><button class="switch" data-ctl="light" aria-label="灯带电源开关"></button></article>
+      <article class="control-card"><div><h3>灯带模式</h3><p>AUTO 根据 5–1000 lux 调节；MANUAL 使用设定亮度</p></div><button class="switch" data-ctl="light_auto" aria-label="自动模式开关"></button></article>
       <article class="control-card"><div><h3>蜂鸣器</h3><p>低电平触发 · 告警提示</p></div><button class="switch" data-ctl="buzzer" aria-label="蜂鸣器开关"></button></article>
-      <article class="control-card"><div><h3>自动模式</h3><p>根据环境数据自动调节执行器</p></div><button class="switch" data-ctl="auto" aria-label="自动模式开关"></button></article>
-      <article class="control-card range-card"><div class="range-head"><div><h3>灯带亮度</h3><p>当前由 BH1750 光照数据自动映射</p></div><b class="range-value" id="rangeValue">--%</b></div><input type="range" min="0" max="100" value="0" disabled></article>
+      <article class="control-card range-card"><div class="range-head"><div><h3>灯带亮度</h3><p id="brightnessHint">AUTO 模式由 BH1750 自动映射</p></div><b class="range-value" id="rangeValue">--%</b></div><input id="brightnessRange" type="range" min="1" max="100" value="50" disabled></article>
     </div>
   </section>
 
@@ -148,6 +147,7 @@ static const char WEB_OTA_PAGE[] = R"WEBOTA(
             <div class="summary-row"><span>通信</span><b>UART 115200</b></div>
             <div class="summary-row"><span>固件状态</span><b id="otaSummary">检查中</b></div>
             <div class="summary-row"><span>目标版本</span><b id="systemVersion">--</b></div>
+            <div class="summary-row"><span>TFT 显示语言</span><span style="display:flex;align-items:center;gap:10px"><b id="languageState">中文</b><button class="switch" data-ctl="ui_chinese" aria-label="TFT 中英文切换"></button></span></div>
           </div>
         </article>
         <article class="panel"><div class="panel-title"><h2>远程服务</h2><span>Roadmap</span></div><div class="summary"><div class="summary-row"><span>传感器 API</span><b style="color:var(--green)">实时</b></div><div class="summary-row"><span>WebSocket</span><b>待接入</b></div><div class="summary-row"><span>MQTT / Pi5</span><b>待接入</b></div></div></article>
@@ -192,13 +192,13 @@ static const char WEB_OTA_PAGE[] = R"WEBOTA(
   function setConnection(mode,text){$('connection').className='connection '+mode;$('connectionText').textContent=text;$('bridgeSummary').textContent=text;$('bridgeState').className='bridge-state '+(mode==='online'||mode==='busy'?'online':'');$('bridgeStateTitle').textContent=mode==='offline'?'ESP32 连接中断':'ESP32 Bridge 在线'}
   function setDevice(name,on,label){$(name+'State').textContent=label;$(name+'Dot').className='state-dot '+(on?'on':'')}
   function setCtlSwitch(name,on){const el=document.querySelector('.switch[data-ctl="'+name+'"]');if(el)el.classList.toggle('on',!!on)}
-  function syncCtlSwitches(data){setCtlSwitch('relay1',!!data.relay1);setCtlSwitch('relay2',!!data.relay2);setCtlSwitch('buzzer',!!data.buzzer);setCtlSwitch('auto',!!data.auto_mode)}
+  function syncCtlSwitches(data){setCtlSwitch('light',!!data.relay2);setCtlSwitch('buzzer',!!data.buzzer);setCtlSwitch('light_auto',!!data.auto_mode);setCtlSwitch('ui_chinese',!!data.ui_chinese);$('languageState').textContent=data.ui_chinese?'中文':'English';$('modeSummary').textContent=data.auto_mode?'自动':'手动'}
   function paintSensors(data){
     if(!data.online){
       ['temperature','humidity','light','pressure'].forEach(id=>$(id).textContent='--');
       ['pir','relay1','relay2','led','buzzer'].forEach(id=>setDevice(id,false,'--'));
-      ['relay1','relay2','buzzer','auto'].forEach(name=>setCtlSwitch(name,false));
-      $('ledDetail').textContent='WS2812B';$('rangeValue').textContent='--%';$('stm32Link').textContent='数据超时';$('modePill').textContent='DATA 中断';return;
+      ['light','buzzer','light_auto','ui_chinese'].forEach(name=>setCtlSwitch(name,false));
+      $('brightnessRange').disabled=true;$('ledDetail').textContent='WS2812B';$('rangeValue').textContent='--%';$('stm32Link').textContent='数据超时';$('modePill').textContent='DATA 中断';return;
     }
     const values={temperature:data.temperature,humidity:data.humidity,light:data.lux,pressure:data.pressure};
     const environmentValid=data.environment_valid!==false,lightValid=data.light_valid!==false;
@@ -210,8 +210,9 @@ static const char WEB_OTA_PAGE[] = R"WEBOTA(
     $('lightHint').textContent=lightValid?'调光范围 5–1000 lux':'传感器数据无效';
     const pirLabel=!data.pir_ready?'未就绪':!data.pir_warmed_up?'预热中':data.pir?'检测到人体':'无人';
     const ledPercent=data.led_percent??data.led_brightness??0;
-    setDevice('pir',!!data.pir&&!!data.pir_warmed_up,pirLabel);setDevice('relay1',!!data.relay1,data.relay1?'开启':'关闭');setDevice('relay2',!!data.relay2,data.relay2?'开启':'关闭');setDevice('led',ledPercent>0,ledPercent+'%');setDevice('buzzer',!!data.buzzer,data.buzzer?'鸣响':'静音');
+    setDevice('pir',!!data.pir&&!!data.pir_warmed_up,pirLabel);setDevice('relay1',!!data.relay1,data.relay1?'开启':'关闭');setDevice('relay2',!!data.relay2,data.relay2?'开启':'关闭');setDevice('led',!!data.relay2&&ledPercent>0,ledPercent+'%');setDevice('buzzer',!!data.buzzer,data.buzzer?'鸣响':'静音');
     syncCtlSwitches(data);
+    $('brightnessRange').value=Math.max(1,ledPercent);$('brightnessRange').disabled=!!data.auto_mode;$('brightnessHint').textContent=data.auto_mode?'AUTO 模式由 BH1750 自动映射':'MANUAL 模式：网页滑块与 TFT 旋钮同步';
     $('ledDetail').textContent='WS2812B · '+ledPercent+'%';$('rangeValue').textContent=ledPercent+'%';$('stm32Link').textContent='在线 · '+(data.age_ms??0)+'ms';$('lastUpdate').textContent=clock();$('modePill').textContent=data.auto_mode?'AUTO 自动':'MANUAL 手动';
   }
   function paintStatus(data){
@@ -224,12 +225,15 @@ static const char WEB_OTA_PAGE[] = R"WEBOTA(
   }
   async function refresh(){try{const r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw new Error();paintStatus(await r.json())}catch(e){setConnection('offline','ESP32 离线');$('otaStatusText').textContent='连接中断';$('otaSummary').textContent='离线'}}
   async function refreshSensors(){if(demo)return;try{const r=await fetch('/api/sensors',{cache:'no-store'});if(r.ok)paintSensors(await r.json());else $('stm32Link').textContent='API 异常'}catch(e){$('stm32Link').textContent='API 连接失败'}}
-  async function sendControl(name,on){const r=await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({[name]:on})});const data=await r.json();if(!r.ok||!data.ok)throw new Error(data.message||'控制失败');syncCtlSwitches(data)}
+  async function sendControl(name,value){const r=await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({[name]:value})});const data=await r.json();if(!r.ok||!data.ok)throw new Error(data.message||'控制失败');paintControlState(data);return data}
+  function paintControlState(data){syncCtlSwitches(data);if(data.led_percent!=null){$('brightnessRange').value=Math.max(1,data.led_percent);$('rangeValue').textContent=data.led_percent+'%'}$('brightnessRange').disabled=!!data.auto_mode;$('brightnessHint').textContent=data.auto_mode?'AUTO 模式由 BH1750 自动映射':'MANUAL 模式：网页滑块与 TFT 旋钮同步';$('modePill').textContent=data.auto_mode?'AUTO 自动':'MANUAL 手动'}
   document.querySelectorAll('.switch[data-ctl]').forEach(btn=>btn.addEventListener('click',async()=>{
     const name=btn.dataset.ctl,target=!btn.classList.contains('on');
-    if(demo){setCtlSwitch(name,target);return}
-    try{await sendControl(name,target)}catch(e){btn.classList.toggle('on',!target);alert('控制失败：'+(e.message||'请检查链路'))}
+    if(demo){setCtlSwitch(name,target);if(name==='light_auto')$('brightnessRange').disabled=target;return}
+    try{await sendControl(name,target);await refreshSensors()}catch(e){btn.classList.toggle('on',!target);alert('控制失败：'+(e.message||'请检查链路'))}
   }));
+  $('brightnessRange').addEventListener('input',()=>{$('rangeValue').textContent=$('brightnessRange').value+'%'});
+  $('brightnessRange').addEventListener('change',async()=>{const value=Number($('brightnessRange').value);if(demo)return;try{await sendControl('brightness',value);await refreshSensors()}catch(e){alert('亮度设置失败：'+(e.message||'请检查链路'));await refreshSensors()}});
 
   fileInput.addEventListener('change',()=>{
     const f=fileInput.files[0];if(!f){$('fileMeta').classList.remove('show');start.disabled=true;return}
@@ -246,7 +250,7 @@ static const char WEB_OTA_PAGE[] = R"WEBOTA(
     try{await upload(file,version);setProgress(52,'暂存校验完成');setResult('固件校验通过，准备写入 STM32…');const r=await fetch('/api/start',{method:'POST'}),body=await r.json();if(!r.ok)throw new Error(body.message||'无法启动 OTA');pollTimer=setInterval(refresh,700);await refresh()}catch(e){setResult(e.message,'error');setBusy(false);await refresh()}
   });
 
-  if(demo){$('demoNote').classList.add('show');setConnection('online','ESP32 在线');paintSensors({online:true,age_ms:28,environment_valid:true,light_valid:true,temperature:26.3,humidity:61,lux:428,pressure:1012.4,pir_ready:true,pir_warmed_up:true,pir:true,relay1:true,relay2:false,auto_mode:true,led_percent:42,buzzer:false});$('otaStatusText').textContent='等待固件';$('otaSummary').textContent='就绪'}else{refresh();refreshSensors();setInterval(()=>{if(!busy)refresh()},3000);setInterval(refreshSensors,1000)}
+  if(demo){$('demoNote').classList.add('show');setConnection('online','ESP32 在线');paintSensors({online:true,age_ms:28,environment_valid:true,light_valid:true,temperature:26.3,humidity:61,lux:428,pressure:1012.4,pir_ready:true,pir_warmed_up:true,pir:true,relay1:false,relay2:true,auto_mode:false,led_percent:42,buzzer:false,ui_chinese:true});$('otaStatusText').textContent='等待固件';$('otaSummary').textContent='就绪'}else{refresh();refreshSensors();setInterval(()=>{if(!busy)refresh()},3000);setInterval(refreshSensors,1000)}
 </script>
 </body>
 </html>

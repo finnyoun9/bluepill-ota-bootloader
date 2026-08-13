@@ -21,6 +21,7 @@ Release/
 *.swp
 *.swo
 *~
+.codex-*.md
 
 # ESP32 / PlatformIO
 .pio/

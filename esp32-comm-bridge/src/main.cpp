@@ -1014,7 +1014,7 @@ static esp_err_t web_sensors_handler(httpd_req_t *req) {
         "\"temperature\":%s,\"humidity\":%s,\"pressure\":%s,"
         "\"lux\":%s,\"pir_ready\":%s,\"pir_warmed_up\":%s,"
         "\"pir\":%s,\"relay1\":%s,\"relay2\":%s,"
-        "\"auto_mode\":%s,\"buzzer\":%s,"
+        "\"auto_mode\":%s,\"buzzer\":%s,\"ui_chinese\":%s,"
         "\"led_brightness\":%u,\"led_percent\":%u}",
         online ? "true" : "false",
         age,
@@ -1032,6 +1032,7 @@ static esp_err_t web_sensors_handler(httpd_req_t *req) {
         (snapshot.flags & SENSOR_FLAG_RELAY2_ON) != 0U ? "true" : "false",
         (snapshot.flags & SENSOR_FLAG_AUTO_MODE) != 0U ? "true" : "false",
         (snapshot.flags & SENSOR_FLAG_BUZZER_ON) != 0U ? "true" : "false",
+        (snapshot.flags & SENSOR_FLAG_UI_CHINESE) != 0U ? "true" : "false",
         snapshot.led_brightness,
         snapshot.led_percent);
     if (json_length < 0 || json_length >= (int)sizeof(json)) {
@@ -1158,8 +1159,10 @@ static esp_err_t web_start_handler(httpd_req_t *req) {
 /*---------------------------------------------------------------------------
  * Web control: POST /api/control
  *
- * Body is a tiny JSON object with one boolean field, e.g.
- *   {"relay1":true} | {"relay2":false} | {"buzzer":true} | {"auto":false}
+ * Body is a tiny JSON object with one field, e.g.
+ *   {"light":true} | {"relay1":true} | {"relay2":false} |
+ *   {"buzzer":true} | {"light_auto":false} |
+ *   {"brightness":50} | {"ui_chinese":true}
  * The command is forwarded to the STM32 through the same CMD_APP_MSG path
  * used by Bluetooth; the reply is the current relay/auto/buzzer state.
  *---------------------------------------------------------------------------*/
@@ -1174,6 +1177,31 @@ static bool web_body_field_true(const char *body, const char *key) {
         found++;
     }
     return strncmp(found, "true", 4) == 0;
+}
+
+static bool web_body_field_u8(const char *body, const char *key,
+                              uint8_t minimum, uint8_t maximum,
+                              uint8_t *value) {
+    const char *found = strstr(body, key);
+    if (found == NULL) {
+        return false;
+    }
+    found += strlen(key);
+    while (*found == ' ' || *found == ':' || *found == '"') {
+        found++;
+    }
+    unsigned parsed = 0U;
+    bool digit_seen = false;
+    while (*found >= '0' && *found <= '9') {
+        parsed = parsed * 10U + (unsigned)(*found - '0');
+        digit_seen = true;
+        found++;
+    }
+    if (!digit_seen || parsed < minimum || parsed > maximum) {
+        return false;
+    }
+    *value = (uint8_t)parsed;
+    return true;
 }
 
 static esp_err_t web_control_handler(httpd_req_t *req) {
@@ -1200,7 +1228,25 @@ static esp_err_t web_control_handler(httpd_req_t *req) {
     ESP_LOGI(TAG, "control body: '%s' len=%d", body, offset);
 
     char msg[32];
-    if (strstr(body, "relay1") != NULL) {
+    if (strstr(body, "light_auto") != NULL) {
+        snprintf(msg, sizeof(msg), "LIGHT %s",
+                 web_body_field_true(body, "light_auto") ? "AUTO"
+                                                         : "MANUAL");
+    } else if (strstr(body, "brightness") != NULL) {
+        uint8_t percent;
+        if (!web_body_field_u8(body, "brightness", 1U, 100U, &percent)) {
+            return web_send_json(req,
+                                 "{\"message\":\"Brightness must be 1..100\"}",
+                                 "400 Bad Request");
+        }
+        snprintf(msg, sizeof(msg), "LIGHT BRIGHTNESS %u", percent);
+    } else if (strstr(body, "ui_chinese") != NULL) {
+        snprintf(msg, sizeof(msg), "LANG %s",
+                 web_body_field_true(body, "ui_chinese") ? "ZH" : "EN");
+    } else if (strstr(body, "light") != NULL) {
+        snprintf(msg, sizeof(msg), "RELAY2 %s",
+                 web_body_field_true(body, "light") ? "ON" : "OFF");
+    } else if (strstr(body, "relay1") != NULL) {
         snprintf(msg, sizeof(msg), "RELAY1 %s",
                  web_body_field_true(body, "relay1") ? "ON" : "OFF");
     } else if (strstr(body, "relay2") != NULL) {
@@ -1240,14 +1286,17 @@ static esp_err_t web_control_handler(httpd_req_t *req) {
                              "502 Bad Gateway");
     }
 
-    char json[128];
+    char json[192];
     snprintf(json, sizeof(json),
-             "{\"ok\":true,\"relay1\":%s,\"relay2\":%s,\"auto\":%s,"
-             "\"buzzer\":%s}",
+             "{\"ok\":true,\"relay1\":%s,\"relay2\":%s,"
+             "\"auto_mode\":%s,\"buzzer\":%s,"
+             "\"led_percent\":%u,\"ui_chinese\":%s}",
              resp.payload[0] ? "true" : "false",
              resp.payload[1] ? "true" : "false",
              resp.payload[2] ? "true" : "false",
-             resp.payload[3] ? "true" : "false");
+             resp.payload[3] ? "true" : "false",
+             resp.len >= 5 ? resp.payload[4] : 0U,
+             resp.len >= 6 && resp.payload[5] ? "true" : "false");
     return web_send_json(req, json, NULL);
 }
 

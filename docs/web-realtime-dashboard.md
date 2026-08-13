@@ -109,6 +109,15 @@ ESP32 的 `sensor_poll` 任务每 1 秒请求一次快照。收到且长度正�
 | `GET /api/status` | OTA 暂存、写入进度与结果 |
 | `POST /api/upload?version=<N>` | 流式上传 Application `.bin` |
 | `POST /api/start` | 启动 STM32 OTA |
+| `POST /api/control` | 下发灯带电源或蜂鸣器控制 |
+
+当前灯带接在 Relay 2 的 `NO2` 触点，Web 使用语义字段而不是暴露接线编号：
+
+```json
+{"light": true}
+```
+
+ESP32 将它转换为 `RELAY2 ON`，经 `CMD_APP_MSG` 发给 STM32；STM32 回传两路继电器状态，页面再用 `relay2` 同步开关。加湿器已移除，自动湿度联动保持关闭。灯带亮度仍由 BH1750 的 5~1000 lux 映射控制，这一步 Web 只控制整条灯带的 VCC 通断。
 
 ## 构建与实机检查
 
@@ -119,6 +128,14 @@ gcc -std=c11 -Wall -Wextra -Werror -Ishared `
 pio run -e app
 pio run -d esp32-comm-bridge
 ```
+
+## 灯带与语言同步
+
+- `POST /api/control {"light":true}`：继电器 2 / NO2 灯带电源。
+- `POST /api/control {"light_auto":true|false}`：AUTO/MANUAL 模式。
+- `POST /api/control {"brightness":1..100}`：MANUAL 亮度设定。
+- `POST /api/control {"ui_chinese":true|false}`：TFT 中文/English。
+- STM32 是状态源；ESP32 每 200ms 缓存快照，Web 每 1s 刷新。TFT 本地旋钮操作会出现在下一次 Web 刷新，Web 操作也通过同一命令通道立即更新 TFT。
 
 烧录两端新固件后，手机或电脑连接 `STM32-OTA-Bridge`：
 
@@ -140,19 +157,19 @@ python tools/preview_web_ui.py --port 8765
 python tools/preview_web_ui.py --port 8765 --device http://192.168.0.104
 ```
 
-`--device` 只代理 `GET /api/status` 和 `GET /api/sensors`，不会转发上传或 OTA 写操作。实机页面截图见 [web-realtime-dashboard-live.png](images/web-realtime-dashboard-live.png)。
+`--device` 代理两个只读接口和 `POST /api/control`，不会转发固件上传或 OTA 写入。实机页面截图见 [web-realtime-dashboard-live.png](images/web-realtime-dashboard-live.png)。
 
 检查顺序：
 
 1. `online` 应为 `true`，`age_ms` 通常低于 1000。
 2. 遮挡 BH1750，确认 `lux` 上下变化，灯带百分比反向变化。
 3. PIR 预热结束后在传感器前移动，确认 `pir` 变化。
-4. 用蓝牙切换继电器/蜂鸣器，确认 Web 状态在约 1 秒内更新。
+4. 在 Web 控制页切换灯带电源，确认 Relay 2 吸合/释放、NO2 通断和页面状态在约 1 秒内一致。
 5. 临时断开 PA9/PA10 任一 UART 线，约 5 秒后确认页面显示数据超时；恢复后应自动上线。
 6. 再跑一次 Web OTA，确认传感器轮询不会抢占 OTA UART 事务。
 
 ## 当前边界
 
-- 已实现：实时状态卡片、1 秒 REST 轮询、离线检测、OTA 页面。
-- 未实现：Web 控制写接口、WebSocket 推送、历史数据持久化、MQTT/Node-RED。
+- 已实现：实时状态卡片、1 秒 REST 轮询、离线检测、灯带电源/蜂鸣器 Web 控制、OTA 页面。
+- 未实现：Web 灯带亮度控制、WebSocket 推送、历史数据持久化、MQTT/Node-RED。
 - 浏览器当前只显示最新快照，不保存历史曲线；历史数据计划由 Pi5 Mosquitto + Node-RED/FlowFuse Dashboard 负责。

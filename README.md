@@ -6,6 +6,10 @@
 
 > 想快速回顾每次提交到底改了什么，可看双语 [CHANGELOG.md](CHANGELOG.md)。它会区分“已经实机验证”和“仍是设计/待验证”的内容。
 
+> 面向求职的完成度审查、两项目组合与阶段验收见 [docs/resume-roadmap.md](docs/resume-roadmap.md)。
+
+> 后续 Agent 从 [docs/agent-handoff.md](docs/agent-handoff.md) 接手：里面有当前构建基线、P0 任务和实机验收红线。
+
 ## 项目定位
 
 嵌入式 MCU / RTOS 方向简历项目。当前核心覆盖 ARM Cortex-M3 裸机 Bootloader、FreeRTOS 多任务、ESP32 双模无线网关、自定义 UART 协议、Web/蓝牙/Python 三条 OTA 入口，以及 I2C 多设备采集和旋钮式本地 OLED 菜单。
@@ -74,11 +78,11 @@
 |------|----------|------|-----------|------|
 | AHT20 + BMP280 组合板 | I2C1 | 温度、湿度、气压 | 0x38 + 0x76/0x77 | 实机通过 |
 | BH1750 | I2C1 | 光照度 | 0x23 | 实机通过 |
-| SSD1306 OLED | I2C1 | 本地菜单与数据显示 | 0x3C | 实机通过 |
-| GMT020-02 TFT | SPI2 | 240×320 彩色镜像界面 | ST7789V | 驱动已完成，待实机验证 |
+| SSD1306 OLED | I2C1 | 常驻环境与执行器状态 | 0x3C | 实机通过 |
+| GMT020-02 TFT | SPI2 | 240×320 彩色菜单与控制页 | ST7789V | 新版 UI 待实机验证 |
 | 15× WS2812B | GPIO bit-bang | BH1750 反向联动白光照明 | PB5 | 实机通过（DOUT 验证） |
 | HC-SR501 | GPIO | 人体红外 | PB0 | 实机通过 |
-| EC11 旋转编码器 | GPIO EXTI + GPIO | 菜单上下/确认 | PA6/PA7 + PA1 | 实机通过 |
+| EC11 + 返回键 | GPIO EXTI + GPIO | 旋转选择、PA1 确认、PA4 返回 | PA6/PA7 + PA1/PA4 | 返回键待接线验证 |
 | MPU6050 | I2C2（规划） | 6轴姿态 | 0x68 | 待接入 |
 | VL53L0X | I2C2（规划） | 激光测距 | 0x29 | 待接入 |
 | DHT11 | 1-Wire（规划） | 温湿度冗余 | - | 待接入 |
@@ -89,8 +93,8 @@
 
 | 模块 | 控制方式 | 联动场景 | 状态 |
 |------|---------|---------|------|
-| 2路继电器 | GPIO OUT | 继电器1=灯带（VCC 通断），继电器2=加湿器（VCC 通断） | 实机通过 |
-| 超声波雾化片 | GPIO OUT | 湿度<40%自动加湿 | 待接入 |
+| 2路继电器 | GPIO OUT | 继电器2=灯带（NO2 通断 VCC）；继电器1暂未使用 | 实机通过 |
+| 超声波雾化片 | GPIO OUT | 暂停接入 | 驱动板已损坏，待更换 |
 | SG90 舵机 | PWM 50Hz | 百叶窗/阀门角度 | 待接入 |
 | 有源蜂鸣器 | GPIO OUT | 手动控制；烟雾/高温联动待接入 | 实机通过 |
 
@@ -121,8 +125,8 @@ PA6/PA7  (GPIO EXTI) ─────── EC11 A/B
 PA1      (GPIO IN) ───────── EC11 确认按键
 PB0      (GPIO IN) ───────── HC-SR501 PIR
 PB10/PB11 (I2C2，规划) ───── MPU6050 + VL53L0X
-PA2      (GPIO OUT) ──────── 继电器1（灯带 VCC，低电平触发）
-PA3      (GPIO OUT) ──────── 继电器2（加湿器 VCC，低电平触发）
+PA2      (GPIO OUT) ──────── 继电器1（暂未使用，低电平触发）
+PA3      (GPIO OUT) ──────── 继电器2（NO2 接灯带 VCC，低电平触发）
 PB1      (GPIO OUT) ──────── 有源蜂鸣器（低电平触发）
 PA0      (TIM2_CH1) ──────── SG90 舵机
 PA5      (ADC) ───────────── MQ-2 烟雾 (经1k/2k分压)
@@ -199,14 +203,16 @@ OTA 页通过 `POST /api/upload?version=<N>` 上传固件，ESP32 检查 54KB �
 | `SEND` | 在桥返回 `FW: staged` 后，把已校验的暂存固件传输到 STM32 |
 | `WIFI <ssid>,<pass>` | 配置 WiFi 并重连（存 NVS，重启后仍生效） |
 | `RESET` | 软件复位 ESP32 |
-| `RELAY1 ON/OFF` | 控制继电器1（灯带 VCC 通断） |
-| `RELAY2 ON/OFF` | 控制继电器2（加湿器 VCC 通断） |
+| `RELAY1 ON/OFF` | 控制继电器1（当前未接负载） |
+| `RELAY2 ON/OFF` | 控制继电器2（NO2 上的灯带 VCC 通断） |
 | `RELAY` | 查询两路继电器状态与自动模式 |
-| `AUTO ON/OFF` | 开启/关闭自动联动：湿度 <40% 自动开加湿器，≥45% 关闭（带回差） |
+| `AUTO ON/OFF` | 加湿器移除期间保持关闭；命令保留兼容性 |
 | `MANUAL` | 关闭自动联动（等价 `AUTO OFF`） |
 | `BUZZER ON/OFF` | 控制 PB1 低电平触发的有源蜂鸣器 |
 
-> Web 传感器状态查询已实现；Web 写控制、舵机和雾化片仍属于后续规划。继电器手动/自动控制目前通过蓝牙命令实现。
+> Web 控制页已接入 `POST /api/control`。当前可控制灯带电源（Relay 2 / NO2）和蜂鸣器；灯带亮度仍由 BH1750 自动映射，网页亮度滑块暂未启用。
+
+> 雾化驱动板曾在未连接雾化片时直接上电并损坏，加湿器现已从固件自动联动和 Web 控制中移除。更换模块后必须先按新模块说明接好雾化片与水位条件，再给驱动板上电。
 
 > `tools/bridge_ota.py` 会自动计算 `<size>` 和 CRC，把固件编码为带偏移量 ACK 的 Base64 分块，执行 `VERIFY` 后再发送 `SEND`。不要在普通串口终端里手工粘贴二进制 `.bin`。
 
@@ -238,12 +244,14 @@ bluepill-ota/
 | 固件 | RAM | Flash | 产物 |
 |------|-----|-------|------|
 | Bootloader | 11.0% (2252B) | 8.8% (5756B) | `.pio/build/bluepill/firmware.bin` |
-| Application | 74.8% (15320B) | 23.8% (15592B) | `.pio/build/app/firmware.bin` |
-| ESP32 Bridge | 21.8% (71464B) | 82.8% (1.52MB) | `esp32-comm-bridge/.pio/build/esp32dev/firmware.bin` |
+| Application | 87.4% (17900B) | 50.6% (33192B) | `.pio/build/app/firmware.bin` |
+| ESP32 Bridge | 19.9% (65184B) | 74.8% (1372089B / 1835008B) | `esp32-comm-bridge/.pio/build/esp32dev/firmware.bin` |
 
 关键结论（细节见 [docs/build-notes.md](docs/build-notes.md)）：
 - **ESP-IDF 6 API 迁移**：`esp_spp_init`→`esp_spp_enhanced_init(&cfg)`；`esp_bt_dev_set_device_name`→`esp_bt_gap_set_device_name`；`esp_wifi_is_connected`→`esp_wifi_sta_get_ap_info()`
-- **ESP32 实际是 2MB Flash**（esp32dev 默认 4MB）：分区表 factory 1.75MB + storage(SPIFFS) 192KB；Bluedroid 固件 ~1.5MB，factory 必须这么大
+- **ESP32 实机是 4MB Flash**：2026-08-12 由 `esptool flash_id` 读取 JEDEC `c4:6016` 确认；factory 保持 1.75MB，storage(SPIFFS) 扩至 2.19MB
+- **灯带控制**：TFT 与 Web 共用 STM32 状态，均支持继电器 2 / NO2 电源开关、AUTO/MANUAL 模式和手动亮度（1–100%）。AUTO 仍按 BH1750 的 5–1000 lux 映射。
+- **TFT 中英文**：系统页按下旋钮，或 Web 系统页切换。中文使用精简 16×16 点阵子集；设置当前仅在本次上电有效，避免为 UI 偏好频繁擦写单 Bank Flash。
 - **蓝牙组件用 sdkconfig.defaults 开启**（`-D CONFIG_BT_*` 编译宏对 ESP-IDF 无效）
 - **共享协议跨平台**：`shared/protocol.c` 已 C/C++ 兼容；ESP32 端镜像为 `src/protocol.cpp` 编译
 - **国内网络编译 ESP32 需代理**：`$env:HTTPS_PROXY='http://127.0.0.1:7897'; pio run -d esp32-comm-bridge`
@@ -273,7 +281,7 @@ bluepill-ota/
 - WS2812B 使用 DP100 5V 经 1N4001 降到约 4.2V，数据线为 `PB5 → DIN`，灯带与 STM32 共地。入口串联 220~470Ω 数据电阻仍建议保留，但本次故障并不是缺少该电阻。
 - 原 SPI1 4MHz/5-bit 编码在 `DIN` 上测得的脉宽和数据都合理，但第一颗灯珠 `DOUT` 没有转发，灯带实际未接收。换回 64MHz 下经过实机验证的 GPIO bit-bang 后，第一颗 `DOUT` 捕获到后 14 颗共 336 bit、42 字节的有效帧，才算真正闭环。
 - 最终逻辑：BH1750 每 200ms 更新目标亮度，`≤5 lux → 160/255`、`≥1000 lux → 1/255`，中间反向线性映射；每次最多变化 16 级，2 级以内视为传感器抖动，且仅亮度确实变化时发送灯带帧。
-- 加入 Web 实时快照后的 Application 构建占用：RAM 17,796 B（86.9%），Flash 31,348 B（47.8%）。完整波形证据和排障结论见 [docs/build-notes.md](docs/build-notes.md)。
+- 当前 Application 构建占用：RAM 17,900 B（87.4%），Flash 33,192 B（50.6%）。OLED 已改为常驻状态屏，TFT 使用无帧缓冲的局部刷新菜单。完整波形证据和排障结论见 [docs/build-notes.md](docs/build-notes.md)。
 
 ## 关键约束
 

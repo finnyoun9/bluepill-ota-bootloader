@@ -128,12 +128,13 @@ The 2026-08-10 hardware checkpoint adds a local user interface without changing 
 | AHT20 | I2C1, 0x38 | PB6/PB7 | Temperature and humidity with CRC-8 |
 | BMP280 | I2C1, 0x76/0x77 | PB6/PB7 | Calibrated fixed-point pressure |
 | EC11 A/B | GPIO EXTI | PA6/PA7 | Full Gray-code x1 navigation |
-| Confirm button | GPIO input | PA1 | Enter/back action |
+| Confirm button | GPIO input | PA1 | Enter / light-power toggle |
+| Back button | GPIO input | PA4 | Active-low return to TFT menu |
 | HC-SR501 | GPIO input | PB0 | Motion state after 30 s warm-up |
-| Relay 1/2 | GPIO output | PA2/PA3 | Light strip VCC (relay 1) and humidifier VCC (relay 2), active-low |
+| Relay 1/2 | GPIO output | PA2/PA3 | Relay 1 unused; relay 2 / NO2 switches light-strip VCC, active-low |
 | Active buzzer | GPIO output | PB1 | Alarm output, active-low |
 
-All I2C devices currently share the 100kHz I2C1 bus. `vAppTask` starts AHT20 and BMP280 conversions together, reads them after 90 ms, refreshes the environment data every 2 s, and polls BH1750 every 200 ms. The same 5..1000 lux range drives a smoothed inverse 160..1 brightness curve for the WS2812B strip, with a 16-level slew step and a 2-level deadband. Because the 15-LED GPIO frame requires a roughly 0.5ms critical section, the application transmits only when the smoothed brightness actually changes. The UI layer sends the same 16×4 character view to both the SSD1306 and the ST7789. The TFT renders directly over SPI without a framebuffer, and sensor values stay in integer/fixed-point form because STM32F103 has no hardware FPU.
+All I2C devices currently share the 100kHz I2C1 bus. `vAppTask` starts AHT20 and BMP280 conversions together, reads them after 90 ms, refreshes the environment data every 2 s, and polls BH1750 every 200 ms. The same 5..1000 lux range drives a smoothed inverse 160..1 brightness curve for the WS2812B strip, with a 16-level slew step and a 2-level deadband. Because the 15-LED GPIO frame requires a roughly 0.5ms critical section, the application transmits only when the smoothed brightness actually changes. The SSD1306 is now an always-on four-line status display, while the ST7789 owns a five-item menu and detail/control pages. TFT drawing is direct and change-cached: selection cards, values, and the brightness bar update without a framebuffer. Sensor values stay in integer/fixed-point form because STM32F103 has no hardware FPU.
 
 ## Directory Structure
 

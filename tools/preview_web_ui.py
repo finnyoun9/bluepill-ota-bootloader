@@ -38,26 +38,37 @@ def main() -> None:
     device = args.device.rstrip("/") if args.device else None
 
     class Handler(BaseHTTPRequestHandler):
+        def proxy_device(self, method: str, body: bytes | None = None) -> None:
+            if device is None:
+                self.send_error(503, "start preview with --device to proxy live data")
+                return
+            try:
+                headers = {"Cache-Control": "no-store"}
+                if body is not None:
+                    headers["Content-Type"] = "application/json"
+                request = Request(
+                    device + self.path,
+                    data=body,
+                    headers=headers,
+                    method=method,
+                )
+                with urlopen(request, timeout=3) as response:
+                    response_body = response.read()
+                    self.send_response(response.status)
+                    self.send_header(
+                        "Content-Type",
+                        response.headers.get("Content-Type", "application/json"),
+                    )
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Content-Length", str(len(response_body)))
+                    self.end_headers()
+                    self.wfile.write(response_body)
+            except URLError as error:
+                self.send_error(502, f"device API unavailable: {error.reason}")
+
         def do_GET(self) -> None:
             if self.path.split("?", 1)[0] in {"/api/status", "/api/sensors"}:
-                if device is None:
-                    self.send_error(503, "start preview with --device to proxy live data")
-                    return
-                try:
-                    request = Request(device + self.path, headers={"Cache-Control": "no-store"})
-                    with urlopen(request, timeout=2) as response:
-                        body = response.read()
-                        self.send_response(response.status)
-                        self.send_header(
-                            "Content-Type",
-                            response.headers.get("Content-Type", "application/json"),
-                        )
-                        self.send_header("Cache-Control", "no-store")
-                        self.send_header("Content-Length", str(len(body)))
-                        self.end_headers()
-                        self.wfile.write(body)
-                except URLError as error:
-                    self.send_error(502, f"device API unavailable: {error.reason}")
+                self.proxy_device("GET")
                 return
 
             self.send_response(200)
@@ -65,6 +76,16 @@ def main() -> None:
             self.send_header("Content-Length", str(len(page)))
             self.end_headers()
             self.wfile.write(page)
+
+        def do_POST(self) -> None:
+            if self.path.split("?", 1)[0] != "/api/control":
+                self.send_error(405, "only /api/control is proxied")
+                return
+            content_length = int(self.headers.get("Content-Length", "0"))
+            if content_length <= 0 or content_length >= 64:
+                self.send_error(400, "invalid control body")
+                return
+            self.proxy_device("POST", self.rfile.read(content_length))
 
         def log_message(self, _format: str, *_args: object) -> None:
             return

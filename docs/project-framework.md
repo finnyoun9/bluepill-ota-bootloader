@@ -4,11 +4,11 @@
 
 在已有的 Bootloader + FreeRTOS + ESP32-OTA 底层基础上，扩展传感器层和上层控制接口。目标：打造一个**协议全覆盖、外设用到极致、多层控制接口**的简历级嵌入式项目。
 
-### 当前实机 checkpoint（2026-08-11）
+### 当前实机 checkpoint（2026-08-12）
 
 - 已完成：SSD1306 本地菜单、EC11 旋转/确认、BH1750、HC-SR501、AHT20+BMP280 温湿度气压、两路继电器、有源蜂鸣器和 WS2812B 自动调光。
 - 当前 AHT20 与 BMP280 是一块组合模块，因此和 OLED、BH1750 一起共用 I2C1 `PB6/PB7 @ 100kHz`；下面的 I2C2 分组仍是后续目标架构。
-- 当前本地 UI、传感器采样、WS2812B 调光和湿度→继电器2（加湿器）联动集成在已有 `vAppTask` 中；STM32 与 ESP32 新版固件均已烧录，实时 Web 状态页和 `/api/sensors` 已完成局域网实机回归。独立 SensorTask/DisplayTask、Web 写控制、WebSocket 和 MQTT 仍待实现。
+- 当前本地 UI、传感器采样和 WS2812B 调光集成在已有 `vAppTask` 中；灯带 VCC 接 Relay 2 的 NO2，Web 通过 `POST /api/control` 控制通断。雾化驱动板因未接雾化片直接上电而损坏，加湿器与自动湿度联动已暂停。WebSocket 和 MQTT 仍待实现。
 
 ---
 
@@ -46,18 +46,19 @@
 | PA0 | TIM2_CH1 | 旋转编码器 | A | 硬件正交解码（PA0 冲突，换 PA6）|
 | PA1 | TIM2_CH2 | 旋转编码器 | B | |
 
-> ⚠️ DHT11 和编码器都想要 PA0，冲突。改：DHT11 → PA4，编码器 → PA6( TIM3_CH1) + PA7(TIM3_CH2)
+> 当前不再规划 PA4 接 DHT11：AHT20 已提供温湿度，PA4 改作独立返回键。
 
 **修正后：**
 
 | STM32 引脚 | 功能 | 连接模块 | 模块引脚 |
 |------------|------|----------|----------|
-| **1-Wire（修正）** ||||
-| PA4 | GPIO bit-bang | DHT11 | DATA |
+| **独立返回键** ||||
+| PA4 | GPIO input + pull-up | 按键（低电平有效） | KEY，另一端接 GND |
 | **EC11 旋转编码器（当前 GPIO 双边沿实现）** ||||
 | PA6 | GPIO EXTI6 | 旋转编码器 | A (DT) |
 | PA7 | GPIO EXTI7 | 旋转编码器 | B (CLK) |
 | PA1 | GPIO input | 独立确认按键 | KEY |
+| PA4 | GPIO input | 独立返回按键 | KEY |
 | 3.3V/GND | 电源 | 编码器 | VCC/GND |
 | **TIM2 CH1 PWM — SG90 舵机** ||||
 | PA0 | TIM2_CH1 | SG90 | 信号线(橙) |
@@ -431,7 +432,7 @@ bluepill-ota/
 
 ESP32 每秒发送一次 `CMD_GET_SENSOR_SNAPSHOT (0x32)`；STM32 返回 `CMD_SENSOR_SNAPSHOT_RSP (0x87)` 和 18B `SensorSnapshot_t`。快照包含定点温湿度气压、lux、PIR、两路继电器、自动模式、蜂鸣器和灯带亮度。STM32 不拼 JSON，ESP32 缓存后由 `GET /api/sensors` 转换为浏览器使用的 JSON。
 
-传感器轮询、蓝牙命令和 OTA 共用 UART 事务锁；缓存超过 5 秒未更新时 Web 标记 STM32 离线。字段、标志位和验证步骤见 [web-realtime-dashboard.md](web-realtime-dashboard.md)。Web 写控制仍沿用现有 `CMD_APP_MSG` 文本命令，后续再增加 `POST /api/control`，不在本阶段另造第二套控制协议。
+传感器轮询、蓝牙命令、Web 控制和 OTA 共用 UART 事务锁；缓存超过 5 秒未更新时 Web 标记 STM32 离线。`POST /api/control` 沿用现有 `CMD_APP_MSG` 文本命令，当前 `{"light":true|false}` 映射到 `RELAY2 ON|OFF`，控制 NO2 上的灯带电源。字段、标志位和验证步骤见 [web-realtime-dashboard.md](web-realtime-dashboard.md)。
 
 ---
 
@@ -456,9 +457,9 @@ ESP32 每秒发送一次 `CMD_GET_SENSOR_SNAPSHOT (0x32)`；STM32 返回 `CMD_SE
 |------|------|------|
 | **Phase 0** | 面包板接线，I2C 总线扫描，确认第一批设备地址 | 已完成 |
 | **Phase 1** | STM32 当前批次传感器（AHT20/BMP280/BH1750/PIR） | 暂告一段落 |
-| **Phase 2** | 继电器/蜂鸣器已完成；加湿器联动等待模块到货 | 等待硬件 |
-| **Phase 3** | FreeRTOS 任务整合 + 联动控制逻辑（湿度继电器、光照灯带已完成） | 进行中 |
-| **Phase 4** | HTTP 实时仪表盘已完成代码；WebSocket/写控制待扩展 | 进行中 |
+| **Phase 2** | 继电器/蜂鸣器已完成；加湿器驱动板损坏，暂停接入 | 等待硬件 |
+| **Phase 3** | FreeRTOS 任务整合 + 光照灯带联动已完成；湿度执行器暂停 | 进行中 |
+| **Phase 4** | HTTP 实时仪表盘和灯带 Web 开关已完成；WebSocket 待扩展 | 进行中 |
 | **Phase 5** | ESP32 MQTT 上云 | 代码 |
 | **Phase 6** | Python 桌面控制面板 | 代码 |
 | **Phase 7** | 整体联调 + OTA 验证 | 联调 |

@@ -99,6 +99,7 @@ extern "C" {
 #define SENSOR_FLAG_RELAY2_ON     (1U << 6)
 #define SENSOR_FLAG_AUTO_MODE     (1U << 7)
 #define SENSOR_FLAG_BUZZER_ON     (1U << 8)
+#define SENSOR_FLAG_UI_CHINESE    (1U << 9)
 
 /*---------------------------------------------------------------------------
  * Error codes (in NAK / RSP_ERROR payloads)
