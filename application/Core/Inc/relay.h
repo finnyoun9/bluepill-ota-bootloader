@@ -10,8 +10,8 @@
 #include <stdint.h>
 
 #define RELAY_CHANNELS  2U
-#define RELAY_LIGHT_CHANNEL       0U  /* Relay 1 / PA2 / WS2812B VCC */
-#define RELAY_HUMIDIFIER_CHANNEL  1U  /* Relay 2 / PA3 / humidifier VCC */
+#define RELAY_UNUSED_CHANNEL  0U  /* Relay 1 / PA2 / no load connected */
+#define RELAY_LIGHT_CHANNEL   1U  /* Relay 2 / PA3 / NO2 / WS2812B VCC */
 
 bool relay_init(void);
 void relay_set(uint8_t channel, bool on);

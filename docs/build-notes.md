@@ -7,11 +7,11 @@
 | 固件 | 工具链 | RAM | Flash | 产物 |
 |------|--------|-----|-------|------|
 | Bootloader | `pio run -e bluepill` | 11.0% (2260B) | 10.7% (7040B) | `.pio/build/bluepill/firmware.bin` |
-| Application | `pio run -e app` | 86.9% (17796B) | 47.8% (31348B) | `.pio/build/app/firmware.bin` |
-| ESP32 Bridge | `pio run -d esp32-comm-bridge` | 19.9% (65184B) | 74.7% (1370061B / 1835008B) | `esp32-comm-bridge/.pio/build/esp32dev/firmware.bin` |
+| Application | `pio run -e app` | 87.4% (17904B) | 55.4% (36320B) | `.pio/build/app/firmware.bin` |
+| ESP32 Bridge | `pio run -d esp32-comm-bridge` | 19.9% (65184B) | 74.9% (1374661B / 1835008B) | `esp32-comm-bridge/.pio/build/esp32dev/firmware.bin` |
 
 - Bootloader 产物约 6.9KB，满足 **8KB 硬约束**
-- Application 仍在 54KB 应用区内；RAM 仅余 2,700B，后续增加任务或大缓冲区前必须检查 heap/stack 余量
+- Application 仍在 54KB 应用区内；RAM 仅余 2,580B，后续增加任务或大缓冲区前必须检查 heap/stack 余量
 - ESP32 开 Bluedroid 后固件 ~1.5MB，factory 分区必须 ≥ 1.5MB
 
 ## 硬件 Bring-up（2026-08-09）
@@ -44,14 +44,17 @@
 - HC-SR501 OUT 接 PB0，页面在上电后先显示 30 秒 `WARMUP`，随后显示 `DETECTED`/`CLEAR`。
 - OLED、旋转选择、确认/返回、光照、人体感应、温湿度和气压均已完成面包板验证。
 - 固件打开 `-Wall -Wextra -Werror`；本次构建无 warning。STM32F103 无 FPU，显示换算继续采用整数/定点运算。
+- OLED 现在固定显示温湿度、气压、光照、灯带亮度、PIR、灯带电源和固件版本；TFT 独立显示五项卡片菜单与详情页。页面缓存只重画当前页相关数据，未使用全屏帧缓冲。
+- 新增 PA4 低电平返回键（内部上拉，按键另一端接 GND）；PA1 继续作为确认键，在灯带详情页直接切换 Relay 2 / NO2。
 
 ## 继电器与蜂鸣器（2026-08-11）
 
 - 两路继电器从与 TFT 冲突的 PB12/PB13 改到 `PA2/PA3`；有源蜂鸣器接 `PB1`。三路均为低电平触发，初始化先输出高电平，避免上电误动作。
 - 继电器模块控制侧接 DP100 5V、IN1/IN2 和公共 GND；负载侧 `COM/NO/NC` 是无源开关触点，`COM` 不会自己产生电压。需要把被控电源送入 `COM`，再由 `NO` 输出到默认断开的负载。
 - 蓝牙命令支持 `RELAY1/RELAY2 ON|OFF`、`RELAY`、`AUTO ON|OFF`、`MANUAL` 和 `BUZZER ON|OFF`。继电器吸合声、触点导通、共地和蜂鸣器动作均已实机确认。
-- 通道映射（PA2/PA3 方案）：**Relay 1 = 灯带 VCC，Relay 2 = 加湿器 VCC**。自动模式只控制继电器2：AHT20 湿度 `<40%` 开启加湿器、`>=45%` 关闭，5% 回差防止临界点频繁吸合。继电器1（灯带）和蜂鸣器当前为手动控制。
-- 最终 Application 烧录并校验后，COM6 回读 `FW Version: 2` 和 `RELAY1: ON, RELAY2: OFF, AUTO: OFF, BUZZER: OFF`，说明 115200-baud STM32↔ESP32 链路和状态回读仍正常。
+- 当前通道映射：**Relay 1 / PA2 暂未使用；Relay 2 / PA3 / NO2 = 灯带 VCC**。加湿器已移除，自动湿度联动强制关闭；网页通过 `{"light":true|false}` 控制 Relay 2，灯带亮度仍由 BH1750 自动映射。
+- 2026-08-12 当前版本已烧录：STM32 ST-Link Verify OK，ESP32 各分区 Hash 校验通过。被动回读为 `RELAY1: OFF, RELAY2: OFF, AUTO: OFF`；新版页面已包含 `light → RELAY2` 和 `NO2` 标识。按用户要求，ESP32 更新后未再次主动切换继电器。
+- 继电器初始化已提前到传感器/显示屏之前，减少复位窗口里的输入瞬态。这是防误动作措施，不是对之前持续咔咔响的根因认定；当时雾化驱动板未接雾化片上电后损坏，损坏负载/供电异常才是现场背景。
 
 ## ESP32 编译要点（ESP-IDF 6.0.1）
 
@@ -77,12 +80,12 @@ CONFIG_BT_BLE_ENABLED=n
 CONFIG_BTDM_CTRL_MODE_BR_EDR_ONLY=y  # Classic-only SPP；释放 BLE RAM
 ```
 
-### 3. Flash 是 2MB 不是 4MB
+### 3. Flash 实测是 4MB
 
-本机这块 ESP32 实际 **2MB**（esp32dev 板默认 4MB）。配置：
-- `platformio.ini`：`board_upload.flash_size = 2MB`（注意是 `upload` 不是 `build`）
-- `sdkconfig.defaults`：`CONFIG_ESPTOOLPY_FLASHSIZE_2MB=y`
-- `partitions.csv`：factory `0x1C0000`（1.75MB）+ storage(SPIFFS) `0x30000`（192KB，存 ≤54KB 的 STM32 固件够用）
+2026-08-12 在下载模式执行 `esptool flash_id`，读取 JEDEC ID `c4:6016`，工具确认 **4MB**。此前 2MB 配置是误判，现已修正：
+- `platformio.ini`：`board_upload.flash_size = 4MB`
+- `sdkconfig.defaults`：`CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y`
+- `partitions.csv`：factory 保持 `0x1C0000`（1.75MB），storage(SPIFFS) 扩为 `0x230000`（2.19MB），总边界到 `0x400000`
 
 ### 4. C/C++ 混编 flag 冲突 → protocol.cpp
 
@@ -102,6 +105,8 @@ PlatformIO 官方包镜像（contabostorage / github release）在国内直连�
 $env:HTTPS_PROXY='http://127.0.0.1:7897'   # 本机代理端口
 pio run -d esp32-comm-bridge
 ```
+
+2026-08-12 灯带三项控制和 TFT 精简中文包加入后，Application Flash 增加约 3.1KB，仍有约 28KB 余量；中文只收录菜单实际字形，没有引入完整 CJK 字库或 framebuffer。
 
 ## 蓝牙协议（实现现状）
 
@@ -138,7 +143,7 @@ pio run -d esp32-comm-bridge
 - `vAppTask` 每 200ms 把当前传感器和执行器状态复制到 18B `SensorSnapshot_t`；`vCommTask` 收到 `CMD_GET_SENSOR_SNAPSHOT (0x32)` 后返回 `CMD_SENSOR_SNAPSHOT_RSP (0x87)`。
 - ESP32 新增 `sensor_poll` 任务，每 1 秒查询一次 STM32 并写入 Mutex 保护的静态缓存；`GET /api/sensors` 只读取缓存，不让浏览器请求直接占用 UART。
 - 传感器轮询、蓝牙 `VERSION`/继电器命令和 OTA 共用 UART 事务锁。OTA 持锁期间轮询跳过；缓存超过 5 秒未更新时页面显示数据超时。
-- 页面改成首页/控制/系统三页：首页实时显示温湿度、气压、光照、PIR、继电器、蜂鸣器、自动模式与灯带亮度；系统页保留原 Web OTA；控制写接口仍标记为待接入。
+- 页面改成首页/控制/系统三页：首页实时显示温湿度、气压、光照、PIR、继电器、蜂鸣器和灯带亮度；系统页保留原 Web OTA；控制页已接入灯带电源和蜂鸣器写接口。
 - 协议烟测加入 18B 快照帧 round-trip，用 CRC 帧构建与解析验证结构体字节不变。三目标编译无 warning；新版 STM32 Application 已由 ST-Link 写入并 Verify OK，ESP32 固件烧录后 Flash hash 校验通过。ESP32 接入 2.4GHz Wi-Fi 后，`GET /api/sensors` 连续返回真实数据，`online=true`、`age_ms<1000`，板载页面按秒刷新通过实机回归。
 - 完整协议字段、REST JSON 和断线检查步骤见 [web-realtime-dashboard.md](web-realtime-dashboard.md)。
 
@@ -153,7 +158,7 @@ pio run -d esp32-comm-bridge
 - [x] 定义 STM32→ESP32 传感器快照协议并提供 `/api/sensors` 实时状态页
 - [ ] 增加 `/ws` 推送与 Web 写控制接口
 - [ ] Pi5 继续使用现有 Mosquitto，接入 Node-RED + FlowFuse Dashboard 2.0，做可远程访问的实时曲线与状态卡片
-- [x] 加湿器模块到货后接继电器2，验证 `<40%` 开、`>=45%` 关的自动模式
+- [ ] 更换损坏的雾化驱动板；接回前先确认必须带雾化片/水位负载上电的要求，再重新设计加湿器通道
 
 ## GMT020-02 双屏显示（2026-08-10）
 

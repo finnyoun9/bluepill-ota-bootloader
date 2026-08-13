@@ -1,10 +1,11 @@
 # Name,   Type, SubType, Offset,   Size,     Flags
-# ESP32 2MB flash (this unit). App runs from "factory"; "storage" is the
+# ESP32 4MB flash (hardware verified via JEDEC ID c4:6016). App runs from
+# "factory"; "storage" is the
 # SPIFFS partition used to stage firmware before transfer to STM32.
-# The Bluedroid app image is ~1.5MB, so factory gets 1.75MB and storage
-# is trimmed to 192KB (STM32 firmware is at most 54KB).
+# The Bluedroid app image is ~1.5MB, so factory keeps 1.75MB. The remaining
+# 2.19MB is available for STM32 firmware staging and future history data.
 nvs,      data, nvs,     0x9000,   0x4000,
 otadata,  data, ota,     0xd000,   0x2000,
 phy_init, data, phy,     0xf000,   0x1000,
 factory,  app,  factory, 0x10000,  0x1C0000,
-storage,  data, spiffs,  0x1D0000, 0x30000,
+storage,  data, spiffs,  0x1D0000, 0x230000,

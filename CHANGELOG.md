@@ -12,8 +12,8 @@
 - 15 颗 WS2812B 已在 PB5 上通过 64MHz 时钟相关的 GPIO 位操作驱动完成实机验证；BH1750 采用平滑反向亮度曲线，只有亮度变化时才发送新帧。
 - The STM32 application now provides a hardware-verified local environment terminal with an SSD1306 menu, EC11 navigation, BH1750 light sensing, HC-SR501 motion sensing, and AHT20/BMP280 temperature-humidity-pressure readings.
 - STM32 Application 已形成实机验证的本地环境终端：SSD1306 菜单、EC11 导航、BH1750 光照、HC-SR501 人体感应，以及 AHT20/BMP280 温湿度气压采集均已跑通。
-- All four I2C devices share I2C1 on `PB6/PB7 @ 100kHz`; the current application uses 17,796 B RAM (86.9%) and 31,348 B Flash (47.8%).
-- 四个 I2C 设备当前共用 `PB6/PB7 @ 100kHz` 的 I2C1；Application 占用 RAM 17,796 B（86.9%）、Flash 31,348 B（47.8%）。
+- All four I2C devices share I2C1 on `PB6/PB7 @ 100kHz`; the split OLED/TFT application uses 17,900 B RAM (87.4%) and 33,192 B Flash (50.6%).
+- 四个 I2C 设备当前共用 `PB6/PB7 @ 100kHz` 的 I2C1；双屏分工后的 Application 占用 RAM 17,900 B（87.4%）、Flash 33,192 B（50.6%）。
 - Phone-driven Web OTA is hardware-verified: an iPhone connected directly to the ESP32 SoftAP, uploaded the STM32 application, and completed the update without a PC-side sender.
 - 手机 Web OTA 已通过实机验证：iPhone 直连 ESP32 SoftAP、上传 STM32 Application，并在不使用电脑发包工具的情况下完成升级。
 - The Web update moved the target from firmware version 1 to 2; a follow-up Bluetooth `VERSION` query returned `FW Version: 2`.
@@ -29,6 +29,18 @@
 
 ## Milestones / 里程碑
 
+### Unreleased — Web light-strip power control / Web 灯带电源控制
+
+- 中文：当前实物灯带接在 Relay 2 / PA3 的 `NO2`；通道定义同步改为 Relay 1 暂未使用、Relay 2 控制灯带 VCC。Web 新增语义控制字段 `{"light":true|false}`，ESP32 转换为 `RELAY2 ON|OFF` 后复用 `CMD_APP_MSG` 下发。
+- English: The physical light strip is connected to Relay 2 / PA3 through NO2. Relay 1 is now unused, while the Web API maps semantic `{"light":true|false}` requests to `RELAY2 ON|OFF` over the existing `CMD_APP_MSG` path.
+- 安全记录 / Safety: 雾化驱动板在未连接雾化片时直接上电后损坏；加湿器、Web 加湿器开关和 STM32 自动湿度联动均暂停，待更换模块并确认带载上电要求后再恢复。
+
+### Unreleased — Split local UI and verified ESP32 flash / 双屏本地 UI 与 Flash 实测
+
+- 中文：SSD1306 改为常驻四行状态屏；ST7789 改为五项卡片菜单和独立详情/控制页。EC11 旋转选择，PA1 确认；灯带页 PA1 切换 Relay 2 / NO2，新增 PA4 低电平返回键。TFT 采用状态缓存与局部刷新，不分配全屏帧缓冲。
+- English: The SSD1306 is now an always-on four-line status display, while the ST7789 owns a five-card menu and dedicated detail/control pages. EC11 selects, PA1 confirms or toggles Relay 2 / NO2 on the light page, and a new active-low PA4 button returns. TFT updates are cached and partial, with no framebuffer.
+- 验证 / Validation: `esptool flash_id` identified JEDEC `c4:6016` as 4MB. The ESP32 config now uses 4MB with a 1.75MB factory partition and 2.19MB SPIFFS storage. Both targets build; STM32 uses 17,900 B RAM / 33,192 B Flash, ESP32 uses 65,184 B RAM / 1,372,089 B app Flash. Hardware UI validation is pending flashing and button wiring.
+
 ### Unreleased — Actuator and WS2812B hardware closure / 执行器与灯带实机闭环
 
 - 中文：继电器从与 TFT 冲突的 PB12/PB13 改到 PA2/PA3，有源蜂鸣器使用 PB1；三路均为低电平触发，默认上电关闭。两路继电器触点、共地、蓝牙手动命令和蜂鸣器均已实机验证。
@@ -43,7 +55,7 @@
 - English: Added `CMD_GET_SENSOR_SNAPSHOT (0x32)` / `CMD_SENSOR_SNAPSHOT_RSP (0x87)` and an 18-byte fixed-point snapshot. STM32 publishes it from the existing `vAppTask`, without another task or floating-point formatting.
 - 中文：ESP32 每秒查询并缓存快照，新增 `GET /api/sensors`；Web 首页按秒刷新真实传感器和执行器状态，缓存超过 5 秒即显示数据超时。OTA、蓝牙命令与轮询共享 UART 事务锁。
 - English: The ESP32 polls and caches the snapshot once per second and exposes `GET /api/sensors`. The Web home page refreshes real sensor and actuator state every second and reports a timeout after 5 seconds; OTA, Bluetooth commands, and polling share one UART transaction lock.
-- 验证 / Validation: protocol smoke test and both firmware builds pass. Application: RAM 17,796 B (86.9%), Flash 31,348 B (47.8%). ESP32: RAM 65,184 B (19.9%), Flash 1,370,061 B (74.7%). Both images are flashed; repeated LAN API reads stayed online with sub-second cache age, and the embedded dashboard displayed live sensor values (latest snapshot 24.9°C / 51.9%RH / 81 lux at ~345ms cache age). / 协议烟测和两端构建通过；两端固件均已烧录，局域网 API 连续读取保持在线且缓存年龄低于 1 秒，板载仪表盘能显示实时传感器值（最新快照 24.9°C / 51.9%RH / 81 lux，缓存约 345ms）。
+- 验证 / Validation: protocol smoke test and both firmware builds pass. Application: RAM 17,796 B (86.9%), Flash 31,264 B (47.7%). ESP32: RAM 65,184 B (19.9%), Flash 1,372,089 B (74.8%). Both images were flashed and verified; passive Web/API checks confirmed the new light/NO2 UI with both relays and AUTO remaining off. / 协议烟测、两端构建和烧录校验通过；被动 Web/API 检查确认新版灯带/NO2 页面，两路继电器与 AUTO 均保持关闭。
 
 ### v0.13 — Two-channel relay control / 两路继电器控制
 
@@ -53,7 +65,7 @@
 - English: Added a `relay` driver (PB12/PB13, active-low, manual by default) and relay/auto-mode display on the OLED system page. The ESP32 bridge gained `RELAY1/RELAY2 ON|OFF`, `RELAY`, `AUTO ON|OFF`, and `MANUAL` Bluetooth commands, forwarded as `CMD_APP_MSG` with a `CMD_STATUS_RSP` status reply, sharing the OTA mutex.
 - 中文：自动联动以继电器1为加湿器：AHT20 湿度 <40% 开启、≥45% 关闭（5% 回差防抖），复用 vAppTask 现有 2 秒采样周期，未新增任务。
 - English: In AUTO mode, relay 1 drives the humidifier: AHT20 humidity below 40% turns it on, 45% or above turns it off (5% hysteresis), reusing the existing 2-second sampling period in vAppTask without adding a task.
-- 注 / Note: 这是当时 PB12/PB13 引脚方案下的通道定义。引脚迁移到 PA2/PA3 后，当前映射已调整为 **Relay 1 = 灯带 VCC（`RELAY_LIGHT_CHANNEL`）、Relay 2 = 加湿器 VCC（`RELAY_HUMIDIFIER_CHANNEL`）**，蓝牙命令与自动联动均按新映射执行。
+- 注 / Note: 这是当时 PB12/PB13 引脚方案下的通道定义。当前实物接线已调整为 **Relay 1 / PA2 暂未使用、Relay 2 / PA3 / NO2 = 灯带 VCC**；加湿器和自动湿度联动暂停。
 - 验证 / Validation: ESP32 侧编译通过（RAM 19.9%、Flash 73.6%）。**STM32 侧与继电器实机联动尚未验证**——待 Windows 上 `pio run -e app` 编译烧录后用蓝牙命令与 OLED 系统页确认。 / The ESP32 target compiles (RAM 19.9%, Flash 73.6%). **The STM32 side and hardware relay action are not yet verified** — pending a Windows `pio run -e app` build/flash and confirmation via Bluetooth commands and the OLED system page.
 
 ### v0.12 — Local environment terminal / STM32 本地环境终端
@@ -159,12 +171,12 @@
 - 中文：适配 ESP-IDF 6 的 Classic Bluetooth/SPP 初始化 API，修复 UART 配置写法和 Wi-Fi 状态读取，使蓝牙服务真正可以启动。
 - English: Adapted the bridge to ESP-IDF 6 Classic Bluetooth/SPP initialization APIs, corrected UART setup, and fixed Wi-Fi status handling so the Bluetooth service could actually start.
 
-### v0.6 — ESP32 build green on the actual 2 MB board / 实际 2 MB ESP32 构建通过
+### v0.6 — ESP32 build green under the former 2 MB assumption / 按当时 2 MB 假设构建通过
 
 **Commit:** [`abd9953`](https://github.com/finnyoun9/bluepill-ota-bootloader/commit/abd9953f41635c0dcc5aacff9e974efd887c87da)
 
-- 中文：根据实物 ESP32 的 2 MB Flash 调整分区；修复 ESP-IDF 6 构建问题，并为 ESP32 复制共享协议实现，三个目标开始能稳定编译。
-- English: Adjusted partitions for the physical ESP32's 2 MB Flash, fixed ESP-IDF 6 build issues, and added the ESP32 copy of the shared protocol implementation so the targets could compile reliably.
+- 中文：当时按 2 MB 假设调整分区；修复 ESP-IDF 6 构建问题，并为 ESP32 复制共享协议实现，三个目标开始能稳定编译。2026-08-12 后续用 `esptool flash_id` 证实实物为 4 MB，因此 2 MB 属于历史误判。
+- English: Adjusted partitions under the then-current 2 MB assumption, fixed ESP-IDF 6 build issues, and mirrored the shared protocol for ESP32. A later `esptool flash_id` check on 2026-08-12 proved the hardware is 4 MB, so the 2 MB statement was a historical misidentification.
 
 ### v0.7 — Three-target build evidence / 三目标构建证据
 
