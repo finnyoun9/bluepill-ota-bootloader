@@ -39,6 +39,8 @@
 
 - 中文：SSD1306 改为常驻四行状态屏；ST7789 改为五项卡片菜单和独立详情/控制页。EC11 旋转选择，PA1 确认；灯带页 PA1 切换 Relay 2 / NO2，新增 PA4 低电平返回键。TFT 采用状态缓存与局部刷新，不分配全屏帧缓冲。
 - English: The SSD1306 is now an always-on four-line status display, while the ST7789 owns a five-card menu and dedicated detail/control pages. EC11 selects, PA1 confirms or toggles Relay 2 / NO2 on the light page, and a new active-low PA4 button returns. TFT updates are cached and partial, with no framebuffer.
+- 中文：**修复 SSD1306 中文乱码**——根因是 SSD1306 页寻址按"每字节=8 个垂直像素（COM 列）"存储，而 TFT 共用的中文字模是逐行水平扫描（每行 2 字节）存的，直接搬字节会把行列写乱。`oled.c` 新增 `oled_show_utf8()` 做 3 字节 UTF-8 解码，再由 `oled_show_chinese()` 对字模做位转置（水平扫描 → 垂直分页格式）后写入，与 `oled_show_char()` 的 ASCII 路径共用同一套分页写入逻辑。修复前的实拍对比见 [docs/photos/](photos/)。
+- English: **Fixed garbled Chinese text on the SSD1306.** Root cause: the SSD1306's page-addressing mode stores each byte as 8 vertical pixels (one COM column), while the Chinese glyph table shared with the TFT is stored as horizontal row-scan data (2 bytes per row) — writing it directly scrambled rows and columns. `oled.c` gained `oled_show_utf8()` for 3-byte UTF-8 decoding and `oled_show_chinese()` to transpose each glyph (horizontal scan → vertical page format) before writing, sharing the same page-write path as the ASCII `oled_show_char()`. Before/after photos are in [docs/photos/](photos/).
 - 验证 / Validation: `esptool flash_id` identified JEDEC `c4:6016` as 4MB. The ESP32 config now uses 4MB with a 1.75MB factory partition and 2.19MB SPIFFS storage. Both targets build; STM32 uses 17,900 B RAM / 33,192 B Flash, ESP32 uses 65,184 B RAM / 1,372,089 B app Flash. Hardware UI validation is pending flashing and button wiring.
 
 ### Unreleased — Actuator and WS2812B hardware closure / 执行器与灯带实机闭环
