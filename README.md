@@ -1,22 +1,26 @@
-# 智能环境监测与联动控制系统
+# STM32 Smart-Home OTA System / 智能环境监测与联动控制系统
 
-> STM32 Blue Pill + FreeRTOS + ESP32 | 自定义 Bootloader + OTA | 多传感器 + Web仪表盘 + MQTT上云
+> **STM32F103 + FreeRTOS + ESP32**｜自定义 Bootloader｜Wi-Fi / Bluetooth OTA｜实机软硬件联调
 
-基于 STM32F103C8T6 (Blue Pill) + FreeRTOS + ESP32 协处理器的**智能环境监测与联动控制系统**。当前已完成自定义 Bootloader、蓝牙 OTA、手机 Web OTA、STM32 本地环境终端、ESP32 实时 Web 仪表盘，以及两路继电器、有源蜂鸣器和 BH1750→WS2812B 自动调光的实机闭环；两端新版固件已烧录，实时传感器链路和 `GET /api/sensors` 已完成实机回归。MQTT 属于后续扩展目标。
+一个面向 MCU/RTOS 嵌入式研发岗位的智能硬件项目：STM32 负责实时采集与控制，ESP32 负责无线网关和本地 Web 控制，二者通过自定义 UART 协议协作。
 
-> 想快速回顾每次提交到底改了什么，可看双语 [CHANGELOG.md](CHANGELOG.md)。它会区分“已经实机验证”和“仍是设计/待验证”的内容。
+> **Repository rename (2026-08-17):** `bluepill-ota-bootloader` → `stm32-smart-home-ota`。旧名称只强调 Bootloader；新名称准确反映系统包含 FreeRTOS、传感器/执行器、ESP32 网关和 OTA。旧 GitHub 链接会自动重定向。
 
-> 面向求职的完成度审查、两项目组合与阶段验收见 [docs/resume-roadmap.md](docs/resume-roadmap.md)。
+## Verified on hardware / 已实机验证
 
-> 后续 Agent 从 [docs/agent-handoff.md](docs/agent-handoff.md) 接手：里面有当前构建基线、P0 任务和实机验收红线。
+- 8 KB STM32 自定义 Bootloader；Application 从 `0x08002000` 运行，支持向量表重定位和 CRC-32 校验。
+- ESP32 通过蓝牙或手机 Web 暂存固件，再经 UART 分块下发至 STM32；真实硬件 OTA 已闭环。
+- FreeRTOS 5 任务架构（通信、控制、应用、监控、状态灯），集成队列、事件组、StreamBuffer、IWDG 和异常 Hook。
+- AHT20/BMP280、BH1750、OLED、PIR、继电器、蜂鸣器和 WS2812B 已接入；BH1750 → WS2812B 自动调光已实机验证。
+- ESP32 实时 Web 仪表盘和 `GET /api/sensors` 已回归；使用逻辑分析仪以 WS2812B DOUT 为证据定位并校准时序问题。
 
-## 项目定位
+![实时 Web 仪表盘实机截图](docs/images/web-realtime-dashboard-live.png)
 
-嵌入式 MCU / RTOS 方向简历项目。当前核心覆盖 ARM Cortex-M3 裸机 Bootloader、FreeRTOS 多任务、ESP32 双模无线网关、自定义 UART 协议、Web/蓝牙/Python 三条 OTA 入口，以及 I2C 多设备采集和旋钮式本地 OLED 菜单。
+## Evidence boundary / 证据边界
 
-> 下方系统图、传感器和执行器清单包含项目目标架构；是否已经实现以“硬件 OTA 闭环验证”和 [CHANGELOG.md](CHANGELOG.md) 为准。
+`MQTT`、WebSocket、部分传感器和新版 TFT/网页同步仍在开发或待回归，**不作为已完成能力**。完整的已验证/待验证记录见 [CHANGELOG.md](CHANGELOG.md)，求职版本收口计划见 [docs/resume-roadmap.md](docs/resume-roadmap.md)。
 
-## 系统架构
+## System architecture / 系统架构
 
 ```
 传感器层 (STM32)          网关层 (ESP32)           控制层
@@ -219,7 +223,7 @@ OTA 页通过 `POST /api/upload?version=<N>` 上传固件，ESP32 检查 54KB �
 ## 目录结构
 
 ```
-bluepill-ota/
+stm32-smart-home-ota/
 ├── shared/                  # 共享协议 (CRC-32/帧解析/配置)
 ├── bootloader/              # 8KB 自定义 Bootloader
 ├── application/             # STM32 FreeRTOS 应用
