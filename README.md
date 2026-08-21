@@ -66,7 +66,8 @@
 - STM32 传感器快照轮询 + `GET /api/sensors` 实时缓存接口（实机通过）
 - WiFi HTTP Client（远程 OTA 固件下载）
 - SPIFFS 固件缓存 + Application 向量表/CRC 校验
-- WebSocket、MQTT（后续规划）
+- MQTT 客户端（公共 EMQX 沙盒 broker，代码已合入，待实机验证）
+- WebSocket（后续规划）
 
 ### 控制接口
 - **手机 Web OTA**: ESP32 内置响应式页面，iPhone 可直接上传 `.bin`

@@ -7,6 +7,8 @@
  *     files and text commands.
  *   - WiFi HTTP client: downloads firmware from a URL.
  *   - WiFi SoftAP + HTTP server: serves a phone-friendly firmware upload page.
+ *   - MQTT client: publishes the sensor snapshot and accepts control commands
+ *     on a public sandbox broker (broker.emqx.io), namespaced by MAC address.
  *   - UART link: communicates with STM32 bootloader/application using the
  *     shared protocol (115200 baud, framed, CRC-32).
  *   - Orchestrator: manages firmware staging (SPIFFS) and transfer state.
@@ -52,9 +54,12 @@
 #include "esp_gap_bt_api.h"   /* esp_bt_gap_set_device_name (IDF 6) */
 
 #include "esp_wifi.h"
+#include "esp_mac.h"
 #include "esp_http_client.h"
 #include "esp_http_server.h"
 #include "mbedtls/base64.h"
+#include "mqtt_client.h"
+#include "cJSON.h"
 
 #include "web_ota_page.h"
 
@@ -123,6 +128,13 @@ static const char *TAG = "bridge";
 #define WIFI_PASSWORD "YOUR_PASSWORD"
 #endif
 
+/* MQTT — public EMQX sandbox broker (no account, no TLS). Fine for a personal
+ * demo device; migrating to a private broker later only needs a new URI,
+ * since client ID and topics are already namespaced by MAC address. */
+#ifndef MQTT_BROKER_URI
+#define MQTT_BROKER_URI  "mqtt://broker.emqx.io:1883"
+#endif
+
 /*---------------------------------------------------------------------------
  * Global state
  *---------------------------------------------------------------------------*/
@@ -165,6 +177,13 @@ static SensorSnapshot_t g_sensor_cache = {};
 static bool g_sensor_cache_valid = false;
 static uint32_t g_sensor_cache_received_ms = 0;
 
+/* MQTT — topics are namespaced with the last 3 MAC bytes so this device does
+ * not collide with other clients on the shared public broker. */
+static esp_mqtt_client_handle_t g_mqtt_client = NULL;
+static volatile bool   g_mqtt_connected = false;
+static char             g_mqtt_topic_sensors[48];
+static char             g_mqtt_topic_control[48];
+
 /* Bluetooth SPP is a byte stream, so a terminal command can arrive in
  * several ESP_SPP_DATA_IND_EVT callbacks. Accumulate it through CR/LF. */
 static char             g_cmd_buf[256];
@@ -179,6 +198,12 @@ static void bt_spp_init(void);
 static void wifi_init_sta(void);
 static void wifi_connect(const char *ssid, const char *password);
 static void web_server_start(void);
+static void mqtt_init(void);
+static void mqtt_publish_sensors(void);
+static int format_sensor_json(char *json, size_t json_size);
+static bool build_control_message(const char *body, char *msg, size_t msg_size);
+static bool send_control_message(const char *msg, ProtoFrame_t *resp,
+                                 const char **error_message);
 static void sensor_poll_task(void *pv);
 static void bt_recv_task(void *pv);
 static void bt_spp_print(const char *msg);
@@ -303,6 +328,7 @@ static void sensor_poll_task(void *pv) {
             g_sensor_cache_received_ms = bridge_uptime_ms();
             g_sensor_cache_valid = true;
             xSemaphoreGive(g_sensor_cache_mutex);
+            mqtt_publish_sensors();
 
             if (consecutive_failures != 0U) {
                 ESP_LOGI(TAG, "STM32 sensor stream recovered");
@@ -962,7 +988,15 @@ static void web_format_centi(char *output, size_t output_size,
              (unsigned long)(magnitude % 100U));
 }
 
-static esp_err_t web_sensors_handler(httpd_req_t *req) {
+/**
+ * @brief Format the cached sensor snapshot as JSON.
+ *
+ * Shared by the HTTP GET /api/sensors handler and the periodic MQTT publish,
+ * so the wire format only needs to be defined once.
+ *
+ * @return Number of bytes written (excluding NUL), or -1 on overflow.
+ */
+static int format_sensor_json(char *json, size_t json_size) {
     SensorSnapshot_t snapshot = {};
     uint32_t received_ms = 0;
     bool cached = false;
@@ -1006,9 +1040,8 @@ static esp_err_t web_sensors_handler(httpd_req_t *req) {
         strcpy(age, "null");
     }
 
-    char json[768];
     const int json_length = snprintf(
-        json, sizeof(json),
+        json, json_size,
         "{\"online\":%s,\"age_ms\":%s,\"uptime_ms\":%lu,"
         "\"environment_valid\":%s,\"light_valid\":%s,"
         "\"temperature\":%s,\"humidity\":%s,\"pressure\":%s,"
@@ -1035,7 +1068,12 @@ static esp_err_t web_sensors_handler(httpd_req_t *req) {
         (snapshot.flags & SENSOR_FLAG_UI_CHINESE) != 0U ? "true" : "false",
         snapshot.led_brightness,
         snapshot.led_percent);
-    if (json_length < 0 || json_length >= (int)sizeof(json)) {
+    return (json_length < 0 || json_length >= (int)json_size) ? -1 : json_length;
+}
+
+static esp_err_t web_sensors_handler(httpd_req_t *req) {
+    char json[768];
+    if (format_sensor_json(json, sizeof(json)) < 0) {
         return web_send_json(req, "{\"message\":\"Sensor JSON overflow\"}",
                              "500 Internal Server Error");
     }
@@ -1167,41 +1205,86 @@ static esp_err_t web_start_handler(httpd_req_t *req) {
  * used by Bluetooth; the reply is the current relay/auto/buzzer state.
  *---------------------------------------------------------------------------*/
 
-static bool web_body_field_true(const char *body, const char *key) {
-    const char *found = strstr(body, key);
-    if (found == NULL) {
+/**
+ * @brief Parse a control JSON body into an STM32 text command.
+ *
+ * Shared by the HTTP POST /api/control handler and the MQTT control topic,
+ * so the field-name-to-command mapping only needs to be defined once. Uses
+ * cJSON (bundled with ESP-IDF) instead of ad-hoc substring scanning — a
+ * hand-rolled scan previously had to check "light_auto" before "light" to
+ * avoid the substring false-match; exact key lookup removes that footgun.
+ *
+ * @return true if a recognized field was found and msg was filled;
+ *         false if the body is not valid JSON, or has no supported field.
+ */
+static bool build_control_message(const char *body, char *msg, size_t msg_size) {
+    cJSON *root = cJSON_Parse(body);
+    if (root == NULL) {
         return false;
     }
-    found += strlen(key);
-    while (*found == ' ' || *found == ':' || *found == '"') {
-        found++;
+
+    bool ok = true;
+    const cJSON *item;
+    if ((item = cJSON_GetObjectItemCaseSensitive(root, "light_auto")) != NULL) {
+        snprintf(msg, msg_size, "LIGHT %s",
+                 cJSON_IsTrue(item) ? "AUTO" : "MANUAL");
+    } else if ((item = cJSON_GetObjectItemCaseSensitive(root, "brightness")) != NULL) {
+        if (!cJSON_IsNumber(item) || item->valuedouble < 1 ||
+            item->valuedouble > 100) {
+            ok = false;
+        } else {
+            snprintf(msg, msg_size, "LIGHT BRIGHTNESS %d",
+                     (int)item->valuedouble);
+        }
+    } else if ((item = cJSON_GetObjectItemCaseSensitive(root, "ui_chinese")) != NULL) {
+        snprintf(msg, msg_size, "LANG %s", cJSON_IsTrue(item) ? "ZH" : "EN");
+    } else if ((item = cJSON_GetObjectItemCaseSensitive(root, "light")) != NULL) {
+        snprintf(msg, msg_size, "RELAY2 %s", cJSON_IsTrue(item) ? "ON" : "OFF");
+    } else if ((item = cJSON_GetObjectItemCaseSensitive(root, "relay1")) != NULL) {
+        snprintf(msg, msg_size, "RELAY1 %s", cJSON_IsTrue(item) ? "ON" : "OFF");
+    } else if ((item = cJSON_GetObjectItemCaseSensitive(root, "relay2")) != NULL) {
+        snprintf(msg, msg_size, "RELAY2 %s", cJSON_IsTrue(item) ? "ON" : "OFF");
+    } else if ((item = cJSON_GetObjectItemCaseSensitive(root, "buzzer")) != NULL) {
+        snprintf(msg, msg_size, "BUZZER %s", cJSON_IsTrue(item) ? "ON" : "OFF");
+    } else if ((item = cJSON_GetObjectItemCaseSensitive(root, "auto")) != NULL) {
+        snprintf(msg, msg_size, "AUTO %s", cJSON_IsTrue(item) ? "ON" : "OFF");
+    } else {
+        ok = false;
     }
-    return strncmp(found, "true", 4) == 0;
+
+    cJSON_Delete(root);
+    return ok;
 }
 
-static bool web_body_field_u8(const char *body, const char *key,
-                              uint8_t minimum, uint8_t maximum,
-                              uint8_t *value) {
-    const char *found = strstr(body, key);
-    if (found == NULL) {
+/**
+ * @brief Send a control command to the STM32 and wait for its status reply.
+ *
+ * Shared by the HTTP and MQTT control paths. Guards against overlapping an
+ * in-progress OTA transfer, since both control and OTA share USART1.
+ *
+ * @param error_message  Optional; set to a short reason string on failure.
+ */
+static bool send_control_message(const char *msg, ProtoFrame_t *resp,
+                                 const char **error_message) {
+    if (g_ota_running || g_web_ota_state == WEB_OTA_TRANSFERRING) {
+        if (error_message != NULL) *error_message = "OTA transfer busy";
         return false;
     }
-    found += strlen(key);
-    while (*found == ' ' || *found == ':' || *found == '"') {
-        found++;
-    }
-    unsigned parsed = 0U;
-    bool digit_seen = false;
-    while (*found >= '0' && *found <= '9') {
-        parsed = parsed * 10U + (unsigned)(*found - '0');
-        digit_seen = true;
-        found++;
-    }
-    if (!digit_seen || parsed < minimum || parsed > maximum) {
+    if (xSemaphoreTake(g_ota_mutex, pdMS_TO_TICKS(750)) != pdTRUE) {
+        if (error_message != NULL) *error_message = "UART busy, retry later";
         return false;
     }
-    *value = (uint8_t)parsed;
-    return true;
+
+    bool ok = stm32_send_frame(CMD_APP_MSG, (const uint8_t *)msg,
+                               strlen(msg)) &&
+              stm32_wait_cmd(CMD_STATUS_RSP, resp, 2000) &&
+              resp->len >= 4;
+    xSemaphoreGive(g_ota_mutex);
+
+    if (!ok && error_message != NULL) {
+        *error_message = "No response from STM32";
+    }
+    return ok;
 }
 
 static esp_err_t web_control_handler(httpd_req_t *req) {
@@ -1228,62 +1311,21 @@ static esp_err_t web_control_handler(httpd_req_t *req) {
     ESP_LOGI(TAG, "control body: '%s' len=%d", body, offset);
 
     char msg[32];
-    if (strstr(body, "light_auto") != NULL) {
-        snprintf(msg, sizeof(msg), "LIGHT %s",
-                 web_body_field_true(body, "light_auto") ? "AUTO"
-                                                         : "MANUAL");
-    } else if (strstr(body, "brightness") != NULL) {
-        uint8_t percent;
-        if (!web_body_field_u8(body, "brightness", 1U, 100U, &percent)) {
-            return web_send_json(req,
-                                 "{\"message\":\"Brightness must be 1..100\"}",
-                                 "400 Bad Request");
-        }
-        snprintf(msg, sizeof(msg), "LIGHT BRIGHTNESS %u", percent);
-    } else if (strstr(body, "ui_chinese") != NULL) {
-        snprintf(msg, sizeof(msg), "LANG %s",
-                 web_body_field_true(body, "ui_chinese") ? "ZH" : "EN");
-    } else if (strstr(body, "light") != NULL) {
-        snprintf(msg, sizeof(msg), "RELAY2 %s",
-                 web_body_field_true(body, "light") ? "ON" : "OFF");
-    } else if (strstr(body, "relay1") != NULL) {
-        snprintf(msg, sizeof(msg), "RELAY1 %s",
-                 web_body_field_true(body, "relay1") ? "ON" : "OFF");
-    } else if (strstr(body, "relay2") != NULL) {
-        snprintf(msg, sizeof(msg), "RELAY2 %s",
-                 web_body_field_true(body, "relay2") ? "ON" : "OFF");
-    } else if (strstr(body, "buzzer") != NULL) {
-        snprintf(msg, sizeof(msg), "BUZZER %s",
-                 web_body_field_true(body, "buzzer") ? "ON" : "OFF");
-    } else if (strstr(body, "auto") != NULL) {
-        snprintf(msg, sizeof(msg), "AUTO %s",
-                 web_body_field_true(body, "auto") ? "ON" : "OFF");
-    } else {
+    if (!build_control_message(body, msg, sizeof(msg))) {
         return web_send_json(req,
                              "{\"message\":\"Unsupported control field\"}",
                              "400 Bad Request");
     }
     ESP_LOGI(TAG, "control command: '%s'", msg);
 
-    if (g_ota_running || g_web_ota_state == WEB_OTA_TRANSFERRING) {
-        return web_send_json(req, "{\"message\":\"OTA transfer busy\"}",
-                             "409 Conflict");
-    }
-    if (xSemaphoreTake(g_ota_mutex, pdMS_TO_TICKS(750)) != pdTRUE) {
-        return web_send_json(req, "{\"message\":\"UART busy, retry later\"}",
-                             "409 Conflict");
-    }
-
     ProtoFrame_t resp;
-    bool ok = stm32_send_frame(CMD_APP_MSG, (const uint8_t *)msg,
-                               strlen(msg)) &&
-              stm32_wait_cmd(CMD_STATUS_RSP, &resp, 2000) &&
-              resp.len >= 4;
-    xSemaphoreGive(g_ota_mutex);
-
-    if (!ok) {
-        return web_send_json(req, "{\"message\":\"No response from STM32\"}",
-                             "502 Bad Gateway");
+    const char *error_message = NULL;
+    if (!send_control_message(msg, &resp, &error_message)) {
+        char json[96];
+        snprintf(json, sizeof(json), "{\"message\":\"%s\"}", error_message);
+        const bool busy = strcmp(error_message, "No response from STM32") != 0;
+        return web_send_json(req, json,
+                             busy ? "409 Conflict" : "502 Bad Gateway");
     }
 
     char json[192];
@@ -1298,6 +1340,101 @@ static esp_err_t web_control_handler(httpd_req_t *req) {
              resp.len >= 5 ? resp.payload[4] : 0U,
              resp.len >= 6 && resp.payload[5] ? "true" : "false");
     return web_send_json(req, json, NULL);
+}
+
+/*---------------------------------------------------------------------------
+ * MQTT client — public EMQX sandbox broker
+ *
+ * Publishes the same JSON as GET /api/sensors on a topic namespaced by MAC
+ * address, and accepts the same control fields as POST /api/control on a
+ * matching subscribe topic. Both HTTP and MQTT funnel into the same
+ * format_sensor_json()/build_control_message()/send_control_message() so the
+ * wire format and STM32 command mapping are defined exactly once.
+ *---------------------------------------------------------------------------*/
+
+static void mqtt_handle_control(const char *payload, size_t len) {
+    char body[64];
+    if (len == 0 || len >= sizeof(body)) {
+        ESP_LOGW(TAG, "MQTT control payload rejected: %u bytes", (unsigned)len);
+        return;
+    }
+    memcpy(body, payload, len);
+    body[len] = '\0';
+
+    char msg[32];
+    if (!build_control_message(body, msg, sizeof(msg))) {
+        ESP_LOGW(TAG, "MQTT control payload not recognized: '%s'", body);
+        return;
+    }
+
+    ProtoFrame_t resp;
+    const char *error_message = NULL;
+    if (!send_control_message(msg, &resp, &error_message)) {
+        ESP_LOGW(TAG, "MQTT control '%s' failed: %s", msg, error_message);
+    }
+}
+
+static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
+                               int32_t event_id, void *event_data) {
+    (void)handler_args;
+    (void)base;
+    esp_mqtt_event_handle_t event = (esp_mqtt_event_handle_t)event_data;
+
+    switch ((esp_mqtt_event_id_t)event_id) {
+    case MQTT_EVENT_CONNECTED:
+        g_mqtt_connected = true;
+        esp_mqtt_client_subscribe(g_mqtt_client, g_mqtt_topic_control, 0);
+        ESP_LOGI(TAG, "MQTT connected, subscribed to %s", g_mqtt_topic_control);
+        break;
+    case MQTT_EVENT_DISCONNECTED:
+        g_mqtt_connected = false;
+        ESP_LOGW(TAG, "MQTT disconnected");
+        break;
+    case MQTT_EVENT_DATA:
+        mqtt_handle_control(event->data, (size_t)event->data_len);
+        break;
+    default:
+        break;
+    }
+}
+
+static void mqtt_init(void) {
+    uint8_t mac[6] = {0};
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    snprintf(g_mqtt_topic_sensors, sizeof(g_mqtt_topic_sensors),
+             "envlink/%02x%02x%02x/sensors", mac[3], mac[4], mac[5]);
+    snprintf(g_mqtt_topic_control, sizeof(g_mqtt_topic_control),
+             "envlink/%02x%02x%02x/control", mac[3], mac[4], mac[5]);
+
+    char client_id[32];
+    snprintf(client_id, sizeof(client_id), "envlink-%02x%02x%02x",
+             mac[3], mac[4], mac[5]);
+
+    esp_mqtt_client_config_t cfg = {};
+    cfg.broker.address.uri = MQTT_BROKER_URI;
+    cfg.credentials.client_id = client_id;
+
+    g_mqtt_client = esp_mqtt_client_init(&cfg);
+    if (g_mqtt_client == NULL) {
+        ESP_LOGE(TAG, "MQTT client init failed");
+        return;
+    }
+    esp_mqtt_client_register_event(g_mqtt_client, (esp_mqtt_event_id_t)ESP_EVENT_ANY_ID,
+                                   mqtt_event_handler, NULL);
+    esp_mqtt_client_start(g_mqtt_client);
+    ESP_LOGI(TAG, "MQTT starting: %s (sensors -> %s)",
+             MQTT_BROKER_URI, g_mqtt_topic_sensors);
+}
+
+static void mqtt_publish_sensors(void) {
+    if (!g_mqtt_connected || g_mqtt_client == NULL) {
+        return;
+    }
+    char json[768];
+    if (format_sensor_json(json, sizeof(json)) < 0) {
+        return;
+    }
+    esp_mqtt_client_publish(g_mqtt_client, g_mqtt_topic_sensors, json, 0, 0, 0);
 }
 
 static void web_server_start(void) {
@@ -1734,6 +1871,10 @@ extern "C" void app_main(void) {
 
     /* Start phone-friendly Web OTA page on the SoftAP. */
     web_server_start();
+
+    /* Connect to the public MQTT sandbox; esp-mqtt reconnects on its own
+     * once the WiFi station link comes up, so no ordering dependency here. */
+    mqtt_init();
 
     /* Keep a non-blocking sensor snapshot cache for the Web dashboard. */
     BaseType_t sensor_task_created =

@@ -6,6 +6,8 @@
 
 ## Current status / 当前状态
 
+- An MQTT client on the public EMQX sandbox broker (`broker.emqx.io:1883`) is implemented: it publishes the same sensor JSON as `GET /api/sensors` on a MAC-namespaced topic and accepts the same control fields as `POST /api/control` on a matching subscribe topic. **Code compiles cleanly but is not yet hardware-verified.**
+- 公共 EMQX 沙盒 broker（`broker.emqx.io:1883`）的 MQTT 客户端已实现：在按 MAC 地址命名空间隔离的 topic 上发布与 `GET /api/sensors` 相同的传感器 JSON，并在对应订阅 topic 上接受与 `POST /api/control` 相同的控制字段。**代码编译通过，尚未实机验证。**
 - Two active-low relay channels on PA2/PA3 and an active-low buzzer on PB1 are hardware-verified. Bluetooth supports `RELAY1/RELAY2 ON|OFF`, `RELAY`, `AUTO ON|OFF`, `MANUAL`, and `BUZZER ON|OFF`.
 - PA2/PA3 两路低电平触发继电器与 PB1 低电平触发蜂鸣器均已实机验证；蓝牙命令覆盖 `RELAY1/RELAY2 ON|OFF`、`RELAY`、`AUTO ON|OFF`、`MANUAL` 和 `BUZZER ON|OFF`。
 - The 15-LED WS2812B strip is hardware-verified on PB5 using a 64MHz clock-dependent GPIO bit-bang driver. The BH1750 now drives a smoothed inverse brightness curve, and frames are sent only when brightness changes.
@@ -28,6 +30,16 @@
 - 实时 Web 仪表盘已完成端到端实机验证：STM32 18 字节定点快照、ESP32 每秒 UART 缓存和 `GET /api/sensors` 均已烧录运行，局域网页面能持续显示真实数据。
 
 ## Milestones / 里程碑
+
+### Unreleased — MQTT cloud publish/control / MQTT 上云发布与控制
+
+- 中文：新增 `mqtt_client`（ESP-IDF `esp-mqtt`，通过 IDF Component Registry 引入），连接公共 EMQX 沙盒 broker `broker.emqx.io:1883`（无需账号，未加密）。Client ID 和 topic（`envlink/<mac后3字节>/sensors`、`.../control`）用 STA MAC 地址后 3 字节命名空间隔离，避免和其他设备撞车。之后若切换到私有 broker（如 EMQX Cloud Serverless 免费版），只需改 `MQTT_BROKER_URI`。
+- English: Added an `esp-mqtt` client (pulled in via the ESP-IDF Component Registry) connecting to the public EMQX sandbox broker `broker.emqx.io:1883` (no account, unencrypted). The client ID and topics (`envlink/<mac-suffix>/sensors`, `.../control`) are namespaced by the last 3 bytes of the STA MAC address to avoid colliding with other clients on the shared broker. Moving to a private broker later (e.g. a free EMQX Cloud Serverless deployment) only requires changing `MQTT_BROKER_URI`.
+- 中文：重构提取出 `format_sensor_json()` 和 `build_control_message()`/`send_control_message()`，HTTP 的 `/api/sensors`、`/api/control` 和 MQTT 发布/订阅现在共用同一套 JSON 序列化和 STM32 命令映射，没有重复实现。控制字段解析从手写的 `strstr` 子串扫描改为 ESP-IDF 自带的 cJSON（通过 Component Registry 引入 `espressif/cjson`）——原来的扫描依赖 if/else 顺序才能让 `"light_auto"` 不被 `"light"` 的子串匹配误判，cJSON 按精确键名查找后不再需要这个技巧。
+- English: Extracted `format_sensor_json()` and `build_control_message()`/`send_control_message()` so HTTP's `/api/sensors`/`/api/control` and the MQTT publish/subscribe path share one JSON serializer and one STM32 command mapping instead of duplicating logic. Control-field parsing moved from a hand-rolled `strstr` substring scan to ESP-IDF's bundled cJSON (`espressif/cjson`, also pulled via the Component Registry) — the old scan depended on if/else ordering to keep `"light_auto"` from false-matching the `"light"` substring, which exact-key lookup no longer needs.
+- 中文：`mqtt` 和 `cjson` 组件在 ESP-IDF 6.0.1 里都已从内置组件迁移到 Component Registry，不再随框架直接打包；`esp32-comm-bridge/src/idf_component.yml` 声明了这两个依赖，首次构建会自动联网拉取。
+- English: Both `mqtt` and `cjson` moved from built-in ESP-IDF components to the Component Registry as of IDF 6.0.1, so they are no longer bundled with the framework by default; `esp32-comm-bridge/src/idf_component.yml` declares both dependencies, and the first build fetches them automatically.
+- 验证 / Validation: ESP32 目标本机编译通过（干净 rebuild 无告警），RAM 65,312 B（19.9%），Flash 1,408,677 B（76.8%）。**MQTT 收发、topic 命名和控制回路均未接入真实硬件验证**——待 ESP32 烧录后用 MQTT 客户端订阅 sensors topic、发布 control topic 确认。 / The ESP32 target builds cleanly on this machine (clean rebuild, no warnings) at RAM 65,312 B (19.9%) and Flash 1,408,677 B (76.8%). **MQTT publish/subscribe, topic naming, and the control loop are not yet verified against real hardware** — pending an ESP32 flash and a manual MQTT client test against the sensors/control topics.
 
 ### Unreleased — Web light-strip power control / Web 灯带电源控制
 
