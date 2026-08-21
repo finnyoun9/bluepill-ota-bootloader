@@ -5,6 +5,7 @@ PlatformIO's current ststm32 platform asks OpenOCD 0.12 for the removed
 transport itself, so use it directly for both project images.
 """
 
+import sys
 from os.path import join
 
 Import("env")
@@ -16,7 +17,8 @@ FLASH_ADDRESS = {
 
 platform = env.PioPlatform()
 openocd_dir = platform.get_package_dir("tool-openocd")
-openocd = join(openocd_dir, "bin", "openocd.exe")
+openocd_bin = "openocd.exe" if sys.platform == "win32" else "openocd"
+openocd = join(openocd_dir, "bin", openocd_bin)
 scripts_dir = join(openocd_dir, "openocd", "scripts")
 interface_cfg = join(scripts_dir, "interface", "stlink.cfg")
 target_cfg = join(scripts_dir, "target", "stm32f1x.cfg")
