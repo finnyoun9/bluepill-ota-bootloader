@@ -22,6 +22,12 @@
 - 使用 `tools/bridge_ota.py COM6 .pio/build/app/firmware.bin --version 1` 推送 15,956 字节镜像（CRC-32 `0x3B274D7E`），ESP32 返回 `STATUS: OTA complete!`。
 - OTA 完成并重启后，`VERSION` 返回 `FW Version: 1`，证明暂存、Bootloader 切换、Flash 擦写、CRC 校验和应用回跳均已跑通。
 
+### ST-Link 与 IWDG（2026-08-21）
+
+- Application 的 IWDG 使用约 4 秒超时，且在 `NVIC_SystemReset()` 后持续运行；SWD 烧录时 CPU 被 halt，IWDG 仍会计时并在完整 Application 写入过程中复位目标，OpenOCD 表现为 `external reset detected` 或 Flash algorithm abort。
+- `tools/stlink_upload.py` 会在烧录前经 SWD 将 IWDG 临时延长至约 26 秒，再执行写入和 verify。不要把该报错先判定为 NRST 短路或板卡损坏。
+- 如果 SWD 无法在 IWDG 超时前 halt，给 Blue Pill 完整断电再上电后立即烧录；刷完后的 Application 会自行恢复约 4 秒看门狗配置。
+
 ## Application 编译要点
 
 原来 `application/` 从未编译过（缺 FreeRTOS 内核、HAL、时钟配置），本次补全：
