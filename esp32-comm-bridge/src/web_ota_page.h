@@ -150,7 +150,7 @@ static const char WEB_OTA_PAGE[] = R"WEBOTA(
             <div class="summary-row"><span>TFT 显示语言</span><span style="display:flex;align-items:center;gap:10px"><b id="languageState">中文</b><button class="switch" data-ctl="ui_chinese" aria-label="TFT 中英文切换"></button></span></div>
           </div>
         </article>
-        <article class="panel"><div class="panel-title"><h2>远程服务</h2><span>Roadmap</span></div><div class="summary"><div class="summary-row"><span>传感器 API</span><b style="color:var(--green)">实时</b></div><div class="summary-row"><span>WebSocket</span><b>待接入</b></div><div class="summary-row"><span>MQTT / Pi5</span><b>待接入</b></div></div></article>
+        <article class="panel"><div class="panel-title"><h2>远程服务</h2><span>Live</span></div><div class="summary"><div class="summary-row"><span>传感器 API</span><b style="color:var(--green)">实时</b></div><div class="summary-row"><span>WebSocket</span><b>待接入</b></div><div class="summary-row"><span>MQTT / EMQX</span><b id="mqttState">连接中</b></div></div></article>
       </div>
 
       <article class="panel">
@@ -191,9 +191,11 @@ static const char WEB_OTA_PAGE[] = R"WEBOTA(
   function setBusy(value){busy=value;start.disabled=value||!fileInput.files.length;fileInput.disabled=value;$('version').disabled=value}
   function setConnection(mode,text){$('connection').className='connection '+mode;$('connectionText').textContent=text;$('bridgeSummary').textContent=text;$('bridgeState').className='bridge-state '+(mode==='online'||mode==='busy'?'online':'');$('bridgeStateTitle').textContent=mode==='offline'?'ESP32 连接中断':'ESP32 Bridge 在线'}
   function setDevice(name,on,label){$(name+'State').textContent=label;$(name+'Dot').className='state-dot '+(on?'on':'')}
+  function setMqttStatus(connected){const el=$('mqttState');el.textContent=connected?'已连接 EMQX':'等待 Wi-Fi / Broker';el.style.color=connected?'var(--green)':''}
   function setCtlSwitch(name,on){const el=document.querySelector('.switch[data-ctl="'+name+'"]');if(el)el.classList.toggle('on',!!on)}
   function syncCtlSwitches(data){setCtlSwitch('light',!!data.relay2);setCtlSwitch('buzzer',!!data.buzzer);setCtlSwitch('light_auto',!!data.auto_mode);setCtlSwitch('ui_chinese',!!data.ui_chinese);$('languageState').textContent=data.ui_chinese?'中文':'English';$('modeSummary').textContent=data.auto_mode?'自动':'手动'}
   function paintSensors(data){
+    setMqttStatus(!!data.mqtt_connected);
     if(!data.online){
       ['temperature','humidity','light','pressure'].forEach(id=>$(id).textContent='--');
       ['pir','relay1','relay2','led','buzzer'].forEach(id=>setDevice(id,false,'--'));
@@ -250,7 +252,7 @@ static const char WEB_OTA_PAGE[] = R"WEBOTA(
     try{await upload(file,version);setProgress(52,'暂存校验完成');setResult('固件校验通过，准备写入 STM32…');const r=await fetch('/api/start',{method:'POST'}),body=await r.json();if(!r.ok)throw new Error(body.message||'无法启动 OTA');pollTimer=setInterval(refresh,700);await refresh()}catch(e){setResult(e.message,'error');setBusy(false);await refresh()}
   });
 
-  if(demo){$('demoNote').classList.add('show');setConnection('online','ESP32 在线');paintSensors({online:true,age_ms:28,environment_valid:true,light_valid:true,temperature:26.3,humidity:61,lux:428,pressure:1012.4,pir_ready:true,pir_warmed_up:true,pir:true,relay1:false,relay2:true,auto_mode:false,led_percent:42,buzzer:false,ui_chinese:true});$('otaStatusText').textContent='等待固件';$('otaSummary').textContent='就绪'}else{refresh();refreshSensors();setInterval(()=>{if(!busy)refresh()},3000);setInterval(refreshSensors,1000)}
+  if(demo){$('demoNote').classList.add('show');setConnection('online','ESP32 在线');paintSensors({online:true,mqtt_connected:true,age_ms:28,environment_valid:true,light_valid:true,temperature:26.3,humidity:61,lux:428,pressure:1012.4,pir_ready:true,pir_warmed_up:true,pir:true,relay1:false,relay2:true,auto_mode:false,led_percent:42,buzzer:false,ui_chinese:true});$('otaStatusText').textContent='等待固件';$('otaSummary').textContent='就绪'}else{refresh();refreshSensors();setInterval(()=>{if(!busy)refresh()},3000);setInterval(refreshSensors,1000)}
 </script>
 </body>
 </html>

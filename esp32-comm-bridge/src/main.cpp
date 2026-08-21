@@ -1042,7 +1042,7 @@ static int format_sensor_json(char *json, size_t json_size) {
 
     const int json_length = snprintf(
         json, json_size,
-        "{\"online\":%s,\"age_ms\":%s,\"uptime_ms\":%lu,"
+        "{\"online\":%s,\"mqtt_connected\":%s,\"age_ms\":%s,\"uptime_ms\":%lu,"
         "\"environment_valid\":%s,\"light_valid\":%s,"
         "\"temperature\":%s,\"humidity\":%s,\"pressure\":%s,"
         "\"lux\":%s,\"pir_ready\":%s,\"pir_warmed_up\":%s,"
@@ -1050,6 +1050,7 @@ static int format_sensor_json(char *json, size_t json_size) {
         "\"auto_mode\":%s,\"buzzer\":%s,\"ui_chinese\":%s,"
         "\"led_brightness\":%u,\"led_percent\":%u}",
         online ? "true" : "false",
+        g_mqtt_connected ? "true" : "false",
         age,
         (unsigned long)snapshot.uptime_ms,
         environment_valid ? "true" : "false",
